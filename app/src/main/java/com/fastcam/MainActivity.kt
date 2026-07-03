@@ -81,6 +81,7 @@ fun CameraAppContent() {
     var resolutionHeight by remember { mutableIntStateOf(1080) }
     var stabilizationEnabled by remember { mutableStateOf(true) }
     var oisEnabled by remember { mutableStateOf(false) }
+    var aeMode by remember { mutableIntStateOf(0) }
     var targetFps by remember { mutableIntStateOf(60) }
     var noiseReductionMode by remember { mutableIntStateOf(1) } // 1 = Fast, 0 = Off, 2 = High Quality
     var audioSource by remember { mutableIntStateOf(MediaRecorder.AudioSource.CAMCORDER) }
@@ -107,6 +108,8 @@ fun CameraAppContent() {
                 onStabilizationChange = { stabilizationEnabled = it },
                 oisEnabled = oisEnabled,
                 onOisChange = { oisEnabled = it },
+                aeMode = aeMode,
+                onAeModeChange = { aeMode = it },
                 fps = targetFps,
                 onFpsChange = { targetFps = it },
                 noiseReductionMode = noiseReductionMode,

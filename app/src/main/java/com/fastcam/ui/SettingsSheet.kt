@@ -27,6 +27,8 @@ fun SettingsSheet(
     onStabilizationChange: (Boolean) -> Unit,
     oisEnabled: Boolean,
     onOisChange: (Boolean) -> Unit,
+    aeMode: Int,
+    onAeModeChange: (Int) -> Unit,
     fps: Int,
     onFpsChange: (Int) -> Unit,
     noiseReductionMode: Int,
@@ -112,6 +114,44 @@ fun SettingsSheet(
                     onClick = { 
                         onFpsChange(60)
                         NativeBridge.nativeSetFrameRate(60)
+                    }
+                )
+            }
+
+            // Auto Exposure Mode (Custom PID vs Hardware AE)
+            Text(
+                text = "Auto Exposure Mode",
+                fontSize = 14.sp,
+                color = Color.Gray,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ResolutionBtn(
+                    label = "Custom (Cinema)",
+                    selected = aeMode == 0,
+                    onClick = { 
+                        onAeModeChange(0)
+                        NativeBridge.nativeSetAeMode(0)
+                    }
+                )
+                ResolutionBtn(
+                    label = "Hardware (Auto)",
+                    selected = aeMode == 1,
+                    onClick = { 
+                        onAeModeChange(1)
+                        NativeBridge.nativeSetAeMode(1)
+                    }
+                )
+                ResolutionBtn(
+                    label = "Portrait (Face)",
+                    selected = aeMode == 2,
+                    onClick = { 
+                        onAeModeChange(2)
+                        NativeBridge.nativeSetAeMode(2)
                     }
                 )
             }

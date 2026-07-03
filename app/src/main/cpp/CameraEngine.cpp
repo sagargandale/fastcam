@@ -316,25 +316,63 @@ bool CameraEngine::configureCaptureRequest() {
 void CameraEngine::applyExposureSettings() {
     if (!mCaptureRequest) return;
 
-    // Dynamically update PID target based on exposure compensation value
-    float newTarget = 0.47f * std::pow(1.5f, (float)mExposureCompensation);
-    mPidController->setTarget(std::max(0.05f, std::min(newTarget, 0.95f)));
-
     if (mIsAutoMode) {
-        // PID-controlled or manual override of auto mode
-        uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_OFF;
-        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
-        
-        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SENSOR_SENSITIVITY, 1, &mIso);
-        ACaptureRequest_setEntry_i64(mCaptureRequest, ACAMERA_SENSOR_EXPOSURE_TIME, 1, &mShutterSpeedNs);
-    } else {
-        if (mAutoExposure) {
-            // Manual Mode but auto-exposure selected (PID controlled)
-            uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_OFF;
+        if (mAeMode == 1) {
+            // Hardware Default: Standard auto-exposure
+            uint8_t controlMode = ACAMERA_CONTROL_MODE_AUTO;
+            uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_MODE, 1, &controlMode);
             ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+        } else if (mAeMode == 2) {
+            // Cinematic Portrait: Face priority auto-exposure
+            uint8_t controlMode = ACAMERA_CONTROL_MODE_USE_SCENE_MODE;
+            uint8_t sceneMode = ACAMERA_CONTROL_SCENE_MODE_FACE_PRIORITY;
+            uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_MODE, 1, &controlMode);
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_SCENE_MODE, 1, &sceneMode);
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+        } else {
+            // Custom Cinema: Manual exposure control driven by our logarithmic PID target
+            uint8_t controlMode = ACAMERA_CONTROL_MODE_AUTO;
+            uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_OFF;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_MODE, 1, &controlMode);
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+            
+            // Dynamically update PID target based on exposure compensation value
+            float newTarget = 0.47f * std::pow(1.5f, (float)mExposureCompensation);
+            mPidController->setTarget(std::max(0.05f, std::min(newTarget, 0.95f)));
             
             ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SENSOR_SENSITIVITY, 1, &mIso);
             ACaptureRequest_setEntry_i64(mCaptureRequest, ACAMERA_SENSOR_EXPOSURE_TIME, 1, &mShutterSpeedNs);
+        }
+    } else {
+        // In Manual Screen: Reset controlMode to AUTO to disable scenes, and apply manual focus/exposure
+        uint8_t controlMode = ACAMERA_CONTROL_MODE_AUTO;
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_MODE, 1, &controlMode);
+
+        if (mAutoExposure) {
+            if (mAeMode == 1) {
+                uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+                ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+            } else if (mAeMode == 2) {
+                // Keep face priority enabled in manual screen if Auto-Exposure toggle is checked
+                uint8_t sceneControl = ACAMERA_CONTROL_MODE_USE_SCENE_MODE;
+                uint8_t sceneMode = ACAMERA_CONTROL_SCENE_MODE_FACE_PRIORITY;
+                uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_ON;
+                ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_MODE, 1, &sceneControl);
+                ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_SCENE_MODE, 1, &sceneMode);
+                ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+            } else {
+                uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_OFF;
+                ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
+                
+                // Dynamically update PID target based on exposure compensation value
+                float newTarget = 0.47f * std::pow(1.5f, (float)mExposureCompensation);
+                mPidController->setTarget(std::max(0.05f, std::min(newTarget, 0.95f)));
+                
+                ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SENSOR_SENSITIVITY, 1, &mIso);
+                ACaptureRequest_setEntry_i64(mCaptureRequest, ACAMERA_SENSOR_EXPOSURE_TIME, 1, &mShutterSpeedNs);
+            }
         } else {
             // Full manual exposure settings
             uint8_t aeMode = ACAMERA_CONTROL_AE_MODE_OFF;
@@ -442,6 +480,16 @@ bool CameraEngine::isStabilizationActive() {
     return mUseStabilization && (mGyroSensor != nullptr);
 }
 
+void CameraEngine::setAeMode(int mode) {
+    std::lock_guard<std::mutex> lock(mCameraMutex);
+    mAeMode = mode;
+    LOGI("AE mode updated: mAeMode = %d", mode);
+    if (mCaptureSession && mCaptureRequest) {
+        configureCaptureRequest();
+        updateRepeatingRequest();
+    }
+}
+
 void CameraEngine::startLoopThread() {
     mIsLoopRunning = true;
     mLoopThread = std::thread(&CameraEngine::cameraLoop, this);
@@ -532,42 +580,61 @@ void CameraEngine::cameraLoop() {
         float shiftX = std::max(-0.05f, std::min(mGyroX * 0.15f, 0.05f));
         float shiftY = std::max(-0.05f, std::min(mGyroY * 0.15f, 0.05f));
 
+        // Update filtered average luminance to reject high-frequency noise
+        if (mLastLuma > 0.0f) {
+            mFilteredLuma = mFilteredLuma * 0.8f + mLastLuma * 0.2f;
+        }
+
         // 2. Auto exposure logic (runs in Auto mode or when auto exposure is selected in manual mode)
-        if (mIsAutoMode || mAutoExposure) {
+        if ((mIsAutoMode || mAutoExposure) && mAeMode == 0) {
             aeFrameCounter++;
-            if (aeFrameCounter >= 3) {
+            if (aeFrameCounter >= 4) { // Update every 4 frames to compensate for hardware pipeline delay
                 aeFrameCounter = 0;
-                float controlOutput = mPidController->update(mLastLuma, 3.0f / mTargetFps);
                 
-                // Adjust current exposure parameters relative to the control output
-                double currentExpVal = (double)mIso * (double)mShutterSpeedNs;
-                double targetExpVal = currentExpVal * std::pow(2.0, (double)controlOutput);
+                float targetLuma = mPidController->getTarget();
+                float currentLuma = std::max(0.01f, mFilteredLuma);
 
-                // Locks shutter to standard cinematic 180 degree angle: 1 / (2 * FPS)
-                int64_t targetShutterNs = 1000000000LL / (mTargetFps * 2);
-                int32_t targetIso = (int32_t)(targetExpVal / targetShutterNs);
+                // Calculate required exposure change in EV stops
+                float stopsError = std::log2(targetLuma / currentLuma);
 
-                if (targetIso < 100) {
-                    // Highlight fallback: lock ISO to 100 and shorten shutter speed to prevent overexposure
-                    targetIso = 100;
-                    targetShutterNs = (int64_t)(targetExpVal / 100.0);
-                } else if (targetIso > 3200) {
-                    // Low-light fallback: lock ISO to 3200 and lengthen shutter speed to gather more light
-                    targetIso = 3200;
-                    targetShutterNs = (int64_t)(targetExpVal / 3200.0);
+                // Dead-band clamp to prevent microscopic exposure jitter on static scenes
+                float stepStops = 0.0f;
+                if (std::abs(stopsError) >= 0.03f) {
+                    // Damped step size (15% per step) with max change clamp (0.25 EV stops) for smooth cinematic transition
+                    stepStops = std::max(-0.25f, std::min(stopsError * 0.15f, 0.25f));
                 }
 
-                // Safety clamps: Shutter cannot be longer than 360-degree (1 / FPS) and cannot be shorter than hardware limits (1/8000s)
-                int64_t maxShutterNs = 1000000000LL / mTargetFps;
-                int64_t minShutterNs = 1000000000LL / 8000;
-                targetShutterNs = std::max(minShutterNs, std::min(targetShutterNs, maxShutterNs));
+                if (stepStops != 0.0f) {
+                    // Adjust current exposure parameters relative to the control output
+                    double currentExpVal = (double)mIso * (double)mShutterSpeedNs;
+                    double targetExpVal = currentExpVal * std::pow(2.0, (double)stepStops);
 
-                {
-                    std::lock_guard<std::mutex> lock(mCameraMutex);
-                    mIso = targetIso;
-                    mShutterSpeedNs = targetShutterNs;
-                    applyExposureSettings();
-                    updateRepeatingRequest();
+                    // Locks shutter to standard cinematic 180 degree angle: 1 / (2 * FPS)
+                    int64_t targetShutterNs = 1000000000LL / (mTargetFps * 2);
+                    int32_t targetIso = (int32_t)(targetExpVal / targetShutterNs);
+
+                    if (targetIso < 100) {
+                        // Highlight fallback: lock ISO to 100 and shorten shutter speed to prevent overexposure
+                        targetIso = 100;
+                        targetShutterNs = (int64_t)(targetExpVal / 100.0);
+                    } else if (targetIso > 3200) {
+                        // Low-light fallback: lock ISO to 3200 and lengthen shutter speed to gather more light
+                        targetIso = 3200;
+                        targetShutterNs = (int64_t)(targetExpVal / 3200.0);
+                    }
+
+                    // Safety clamps: Shutter cannot be longer than 360-degree (1 / FPS) and cannot be shorter than hardware limits (1/8000s)
+                    int64_t maxShutterNs = 1000000000LL / mTargetFps;
+                    int64_t minShutterNs = 1000000000LL / 8000;
+                    targetShutterNs = std::max(minShutterNs, std::min(targetShutterNs, maxShutterNs));
+
+                    {
+                        std::lock_guard<std::mutex> lock(mCameraMutex);
+                        mIso = targetIso;
+                        mShutterSpeedNs = targetShutterNs;
+                        applyExposureSettings();
+                        updateRepeatingRequest();
+                    }
                 }
             }
         }

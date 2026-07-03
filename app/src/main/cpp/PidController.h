@@ -25,6 +25,7 @@ public:
     float update(float currentValue, float dt);
 
     void setTarget(float target);
+    float getTarget() const { return mTarget; }
     void reset();
 
 private:

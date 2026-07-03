@@ -40,6 +40,7 @@ public:
     void setStabilization(bool enabled);
     void setOis(bool enabled);
     bool isStabilizationActive();
+    void setAeMode(int mode);
     void releaseCamera();
     
     // UI controls
@@ -102,11 +103,13 @@ private:
     std::unique_ptr<GlRenderer> mGlRenderer;
     std::unique_ptr<MediaEncoder> mMediaEncoder;
     std::unique_ptr<PidController> mPidController;
+    float mFilteredLuma = 0.47f;
 
     // Settings
     bool mIsAutoMode = true;
     bool mUseStabilization = false;
     bool mUseOis = false;
+    int mAeMode = 0; // 0 = Custom Cinema, 1 = Hardware Default, 2 = Cinematic Portrait (Face Priority)
     int mActiveLensFacing = 1; // 0 = front, 1 = back, 2 = external
     int mWidth = 1920;
     int mHeight = 1080;

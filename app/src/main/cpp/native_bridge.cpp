@@ -220,4 +220,12 @@ Java_com_fastcam_engine_NativeBridge_nativeIsStabilizationActive(JNIEnv* env, jo
     return JNI_FALSE;
 }
 
+JNIEXPORT void JNICALL
+Java_com_fastcam_engine_NativeBridge_nativeSetAeMode(JNIEnv* env, jobject thiz, jint mode) {
+    (void)env; (void)thiz;
+    if (gEngine) {
+        gEngine->setAeMode(mode);
+    }
+}
+
 } // extern "C"
