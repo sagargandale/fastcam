@@ -1,0 +1,27 @@
+[
+{
+  "directory": "C:/Users/sgandale/Downloads/git/fastcam/app/.cxx/Debug/52z6j6z1/arm64-v8a",
+  "command": "C:\\Users\\sgandale\\android-sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/sgandale/android-sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dfastcam_engine_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -std=c++17 -o CMakeFiles\\fastcam-engine.dir\\native_bridge.cpp.o -c C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\native_bridge.cpp",
+  "file": "C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\native_bridge.cpp"
+},
+{
+  "directory": "C:/Users/sgandale/Downloads/git/fastcam/app/.cxx/Debug/52z6j6z1/arm64-v8a",
+  "command": "C:\\Users\\sgandale\\android-sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/sgandale/android-sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dfastcam_engine_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -std=c++17 -o CMakeFiles\\fastcam-engine.dir\\CameraEngine.cpp.o -c C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\CameraEngine.cpp",
+  "file": "C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\CameraEngine.cpp"
+},
+{
+  "directory": "C:/Users/sgandale/Downloads/git/fastcam/app/.cxx/Debug/52z6j6z1/arm64-v8a",
+  "command": "C:\\Users\\sgandale\\android-sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/sgandale/android-sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dfastcam_engine_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -std=c++17 -o CMakeFiles\\fastcam-engine.dir\\GlRenderer.cpp.o -c C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\GlRenderer.cpp",
+  "file": "C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\GlRenderer.cpp"
+},
+{
+  "directory": "C:/Users/sgandale/Downloads/git/fastcam/app/.cxx/Debug/52z6j6z1/arm64-v8a",
+  "command": "C:\\Users\\sgandale\\android-sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/sgandale/android-sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dfastcam_engine_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -std=c++17 -o CMakeFiles\\fastcam-engine.dir\\MediaEncoder.cpp.o -c C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\MediaEncoder.cpp",
+  "file": "C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\MediaEncoder.cpp"
+},
+{
+  "directory": "C:/Users/sgandale/Downloads/git/fastcam/app/.cxx/Debug/52z6j6z1/arm64-v8a",
+  "command": "C:\\Users\\sgandale\\android-sdk\\ndk\\27.2.12479018\\toolchains\\llvm\\prebuilt\\windows-x86_64\\bin\\clang++.exe --target=aarch64-none-linux-android28 --sysroot=C:/Users/sgandale/android-sdk/ndk/27.2.12479018/toolchains/llvm/prebuilt/windows-x86_64/sysroot -Dfastcam_engine_EXPORTS -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++17 -fno-limit-debug-info  -fPIC -std=c++17 -o CMakeFiles\\fastcam-engine.dir\\PidController.cpp.o -c C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\PidController.cpp",
+  "file": "C:\\Users\\sgandale\\Downloads\\git\\fastcam\\app\\src\\main\\cpp\\PidController.cpp"
+}
+]
