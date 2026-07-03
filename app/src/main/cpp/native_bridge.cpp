@@ -228,4 +228,20 @@ Java_com_fastcam_engine_NativeBridge_nativeSetAeMode(JNIEnv* env, jobject thiz, 
     }
 }
 
+JNIEXPORT void JNICALL
+Java_com_fastcam_engine_NativeBridge_nativeSetAntiFlicker(JNIEnv* env, jobject thiz, jint hz) {
+    (void)env; (void)thiz;
+    if (gEngine) {
+        gEngine->setAntiFlicker(hz);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_fastcam_engine_NativeBridge_nativeLockAe(JNIEnv* env, jobject thiz, jboolean lock) {
+    (void)env; (void)thiz;
+    if (gEngine) {
+        gEngine->lockAe(lock);
+    }
+}
+
 } // extern "C"

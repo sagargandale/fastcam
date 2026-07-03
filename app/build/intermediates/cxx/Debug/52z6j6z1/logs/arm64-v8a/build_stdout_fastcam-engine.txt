@@ -1,18 +1,3 @@
 ninja: Entering directory `C:\Users\sgandale\Downloads\git\fastcam\app\.cxx\Debug\52z6j6z1\arm64-v8a'
-[1/4] Building CXX object CMakeFiles/fastcam-engine.dir/PidController.cpp.o
-[2/4] Building CXX object CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o
-[3/4] Building CXX object CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o
-C:/Users/sgandale/Downloads/git/fastcam/app/src/main/cpp/CameraEngine.cpp:258:20: warning: ISO C++ requires field designators to be specified in declaration order; field 'onActive' will be initialized after field 'onReady' [-Wreorder-init-list]
-  258 |         .onReady = onSessionReady,
-      |         ~~~~~~~~~~~^~~~~~~~~~~~~~
-C:/Users/sgandale/Downloads/git/fastcam/app/src/main/cpp/CameraEngine.cpp:257:21: note: previous initialization for field 'onActive' is here
-  257 |         .onActive = onSessionActive,
-      |                     ^~~~~~~~~~~~~~~
-C:/Users/sgandale/Downloads/git/fastcam/app/src/main/cpp/CameraEngine.cpp:259:21: warning: ISO C++ requires field designators to be specified in declaration order; field 'onReady' will be initialized after field 'onClosed' [-Wreorder-init-list]
-  259 |         .onClosed = onSessionClosed
-      |         ~~~~~~~~~~~~^~~~~~~~~~~~~~~
-C:/Users/sgandale/Downloads/git/fastcam/app/src/main/cpp/CameraEngine.cpp:258:20: note: previous initialization for field 'onReady' is here
-  258 |         .onReady = onSessionReady,
-      |                    ^~~~~~~~~~~~~~
-2 warnings generated.
-[4/4] Linking CXX shared library C:\Users\sgandale\Downloads\git\fastcam\app\build\intermediates\cxx\Debug\52z6j6z1\obj\arm64-v8a\libfastcam-engine.so
+[1/2] Building CXX object CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o
+[2/2] Linking CXX shared library C:\Users\sgandale\Downloads\git\fastcam\app\build\intermediates\cxx\Debug\52z6j6z1\obj\arm64-v8a\libfastcam-engine.so

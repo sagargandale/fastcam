@@ -23,6 +23,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Cached
+import androidx.compose.material.icons.filled.Lock
+import androidx.compose.material.icons.filled.LockOpen
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
@@ -58,7 +60,15 @@ fun CameraScreen(
     val coroutineScope = rememberCoroutineScope()
     var isRecording by remember { mutableStateOf(false) }
     var isManualMode by remember { mutableStateOf(false) }
+    var aeLocked by remember { mutableStateOf(false) }
     var surfaceObj by remember { mutableStateOf<Surface?>(null) }
+
+    LaunchedEffect(isManualMode) {
+        if (isManualMode && aeLocked) {
+            aeLocked = false
+            NativeBridge.nativeLockAe(false)
+        }
+    }
     
     // Zoom control
     var zoomRatio by remember { mutableFloatStateOf(1.0f) }
@@ -276,18 +286,40 @@ fun CameraScreen(
                 }
             }
 
-            // Setting button in top right
-            IconButton(
-                onClick = onOpenSettings,
-                modifier = Modifier
-                    .size(44.dp)
-                    .background(Color(0x991A1A1A), CircleShape)
+            Row(
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Settings,
-                    contentDescription = "Settings",
-                    tint = Color.White
-                )
+                if (!isManualMode) {
+                    IconButton(
+                        onClick = {
+                            aeLocked = !aeLocked
+                            NativeBridge.nativeLockAe(aeLocked)
+                        },
+                        modifier = Modifier
+                            .size(44.dp)
+                            .background(if (aeLocked) Color(0xFFFFB300) else Color(0x991A1A1A), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = if (aeLocked) Icons.Default.Lock else Icons.Default.LockOpen,
+                            contentDescription = "Lock Exposure & Focus",
+                            tint = if (aeLocked) Color.Black else Color.White
+                        )
+                    }
+                }
+
+                IconButton(
+                    onClick = onOpenSettings,
+                    modifier = Modifier
+                        .size(44.dp)
+                        .background(Color(0x991A1A1A), CircleShape)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings",
+                        tint = Color.White
+                    )
+                }
             }
         }
 

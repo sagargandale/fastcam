@@ -16,6 +16,8 @@ object NativeBridge {
     external fun nativeSetOis(enabled: Boolean)
     external fun nativeIsStabilizationActive(): Boolean
     external fun nativeSetAeMode(mode: Int)
+    external fun nativeSetAntiFlicker(hz: Int)
+    external fun nativeLockAe(lock: Boolean)
     external fun nativeSetFocus(autoFocus: Boolean, distance: Float)
     external fun nativeSetExposure(autoExposure: Boolean, iso: Int, shutterNs: Long)
     external fun nativeSetFrameRate(fps: Int)

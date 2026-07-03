@@ -41,6 +41,8 @@ public:
     void setOis(bool enabled);
     bool isStabilizationActive();
     void setAeMode(int mode);
+    void setAntiFlicker(int hz);
+    void lockAe(bool locked);
     void releaseCamera();
     
     // UI controls
@@ -110,6 +112,7 @@ private:
     bool mUseStabilization = false;
     bool mUseOis = false;
     int mAeMode = 0; // 0 = Custom Cinema, 1 = Hardware Default, 2 = Cinematic Portrait (Face Priority)
+    int mAntiFlickerHz = 0; // 0 = off, 50 = 50Hz, 60 = 60Hz
     int mActiveLensFacing = 1; // 0 = front, 1 = back, 2 = external
     int mWidth = 1920;
     int mHeight = 1080;
@@ -124,6 +127,7 @@ private:
     int32_t mExposureCompensation = 0;
     uint8_t mNoiseReductionMode = 1; // Fast
     float mZoomRatio = 1.0f;
+    bool mAeLocked = false; // AE/AF lock: freezes auto exposure and autofocus in auto mode
 
     // Loop & Synchronization
     std::thread mLoopThread;

@@ -29,6 +29,8 @@ fun SettingsSheet(
     onOisChange: (Boolean) -> Unit,
     aeMode: Int,
     onAeModeChange: (Int) -> Unit,
+    antiFlickerHz: Int,
+    onAntiFlickerChange: (Int) -> Unit,
     fps: Int,
     onFpsChange: (Int) -> Unit,
     noiseReductionMode: Int,
@@ -152,6 +154,53 @@ fun SettingsSheet(
                     onClick = { 
                         onAeModeChange(2)
                         NativeBridge.nativeSetAeMode(2)
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            // Anti-Flicker (light banding prevention)
+            Text(
+                text = "Anti-Flicker (Artificial Light)",
+                fontSize = 14.sp,
+                color = Color.Gray,
+                fontWeight = FontWeight.SemiBold
+            )
+            Text(
+                text = if (antiFlickerHz == 0) "Off — may cause banding under LED/fluorescent"
+                       else if (antiFlickerHz == 50) "50 Hz — India, Europe, Australia"
+                       else "60 Hz — USA, Japan, Canada",
+                fontSize = 11.sp,
+                color = Color(0xFF888888)
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                ResolutionBtn(
+                    label = "Off",
+                    selected = antiFlickerHz == 0,
+                    onClick = {
+                        onAntiFlickerChange(0)
+                        NativeBridge.nativeSetAntiFlicker(0)
+                    }
+                )
+                ResolutionBtn(
+                    label = "50 Hz",
+                    selected = antiFlickerHz == 50,
+                    onClick = {
+                        onAntiFlickerChange(50)
+                        NativeBridge.nativeSetAntiFlicker(50)
+                    }
+                )
+                ResolutionBtn(
+                    label = "60 Hz",
+                    selected = antiFlickerHz == 60,
+                    onClick = {
+                        onAntiFlickerChange(60)
+                        NativeBridge.nativeSetAntiFlicker(60)
                     }
                 )
             }

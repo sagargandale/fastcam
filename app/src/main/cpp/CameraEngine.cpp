@@ -252,12 +252,11 @@ bool CameraEngine::createCaptureSession() {
         LOGW("Failed to apply initial manual capture request parameters.");
     }
 
-    ACameraCaptureSession_stateCallbacks sessionCallbacks{
-        .context = this,
-        .onActive = onSessionActive,
-        .onReady = onSessionReady,
-        .onClosed = onSessionClosed
-    };
+    ACameraCaptureSession_stateCallbacks sessionCallbacks{};
+    sessionCallbacks.context = this;
+    sessionCallbacks.onClosed = onSessionClosed;
+    sessionCallbacks.onReady = onSessionReady;
+    sessionCallbacks.onActive = onSessionActive;
 
     status = ACameraDevice_createCaptureSession(
         mCameraDevice, 
@@ -309,6 +308,25 @@ bool CameraEngine::configureCaptureRequest() {
 
     // Noise Reduction mode
     ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_NOISE_REDUCTION_MODE, 1, &mNoiseReductionMode);
+
+    // Anti-banding (flicker) configuration for hardware AE modes
+    // For Custom Cinema (mode 0), we snap shutter speeds manually in cameraLoop
+    // For Hardware AE and Portrait modes, let hardware ISP handle anti-banding
+    if (mAeMode >= 1) {
+        uint8_t antibanding;
+        if (mAntiFlickerHz == 50) {
+            antibanding = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_50HZ;
+        } else if (mAntiFlickerHz == 60) {
+            antibanding = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_60HZ;
+        } else {
+            antibanding = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_AUTO;
+        }
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibanding);
+    } else {
+        // Custom Cinema: disable hardware anti-banding, we snap manually
+        uint8_t antibanding = ACAMERA_CONTROL_AE_ANTIBANDING_MODE_OFF;
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibanding);
+    }
 
     return true;
 }
@@ -490,6 +508,43 @@ void CameraEngine::setAeMode(int mode) {
     }
 }
 
+void CameraEngine::setAntiFlicker(int hz) {
+    std::lock_guard<std::mutex> lock(mCameraMutex);
+    mAntiFlickerHz = hz;
+    LOGI("Anti-flicker frequency: %d Hz", hz);
+    if (mCaptureSession && mCaptureRequest) {
+        configureCaptureRequest();
+        updateRepeatingRequest();
+    }
+}
+
+void CameraEngine::lockAe(bool locked) {
+    std::lock_guard<std::mutex> lock(mCameraMutex);
+    mAeLocked = locked;
+    LOGI("AE/AF lock: %s", locked ? "LOCKED" : "UNLOCKED");
+
+    if (mCaptureRequest) {
+        if (locked) {
+            // Hardware AE lock: freeze hardware AE state at current value
+            uint8_t aeLock = ACAMERA_CONTROL_AE_LOCK_ON;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_LOCK, 1, &aeLock);
+            // Trigger AF to lock focus at current position
+            uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_START;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
+        } else {
+            // Hardware AE unlock: resume normal AE
+            uint8_t aeLock = ACAMERA_CONTROL_AE_LOCK_OFF;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_LOCK, 1, &aeLock);
+            // Cancel AF trigger to resume continuous autofocus
+            uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_CANCEL;
+            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
+        }
+        if (mCaptureSession) {
+            updateRepeatingRequest();
+        }
+    }
+}
+
 void CameraEngine::startLoopThread() {
     mIsLoopRunning = true;
     mLoopThread = std::thread(&CameraEngine::cameraLoop, this);
@@ -586,7 +641,7 @@ void CameraEngine::cameraLoop() {
         }
 
         // 2. Auto exposure logic (runs in Auto mode or when auto exposure is selected in manual mode)
-        if ((mIsAutoMode || mAutoExposure) && mAeMode == 0) {
+        if ((mIsAutoMode || mAutoExposure) && mAeMode == 0 && !mAeLocked) {
             aeFrameCounter++;
             if (aeFrameCounter >= 4) { // Update every 4 frames to compensate for hardware pipeline delay
                 aeFrameCounter = 0;
@@ -611,16 +666,48 @@ void CameraEngine::cameraLoop() {
 
                     // Locks shutter to standard cinematic 180 degree angle: 1 / (2 * FPS)
                     int64_t targetShutterNs = 1000000000LL / (mTargetFps * 2);
+
+                    // Anti-flicker: snap shutter speed to nearest multiple of the AC light cycle
+                    // Artificial lights flicker at 2x the AC frequency (100Hz for 50Hz mains, 120Hz for 60Hz mains)
+                    // Shutter period must be a whole multiple of the light flicker period to avoid banding
+                    if (mAntiFlickerHz == 50 || mAntiFlickerHz == 60) {
+                        // Light flicker period in nanoseconds: 1 / (2 * Hz)
+                        int64_t flickerPeriodNs = 1000000000LL / (2 * mAntiFlickerHz);
+                        // Snap to nearest whole multiple of flicker period
+                        int64_t multiples = (targetShutterNs + flickerPeriodNs / 2) / flickerPeriodNs;
+                        if (multiples < 1) multiples = 1;
+                        targetShutterNs = multiples * flickerPeriodNs;
+                        LOGI("Anti-flicker snap: %d Hz → shutter %lld ns (%d multiples of %lld ns)",
+                             (int)mAntiFlickerHz, (long long)targetShutterNs,
+                             (int)multiples, (long long)flickerPeriodNs);
+                    }
+
                     int32_t targetIso = (int32_t)(targetExpVal / targetShutterNs);
 
                     if (targetIso < 100) {
                         // Highlight fallback: lock ISO to 100 and shorten shutter speed to prevent overexposure
                         targetIso = 100;
-                        targetShutterNs = (int64_t)(targetExpVal / 100.0);
+                        int64_t highlightShutterNs = (int64_t)(targetExpVal / 100.0);
+                        // Snap highlight shutter to flicker period too
+                        if (mAntiFlickerHz == 50 || mAntiFlickerHz == 60) {
+                            int64_t flickerPeriodNs = 1000000000LL / (2 * mAntiFlickerHz);
+                            int64_t multiples = (highlightShutterNs + flickerPeriodNs / 2) / flickerPeriodNs;
+                            if (multiples < 1) multiples = 1;
+                            highlightShutterNs = multiples * flickerPeriodNs;
+                        }
+                        targetShutterNs = highlightShutterNs;
                     } else if (targetIso > 3200) {
                         // Low-light fallback: lock ISO to 3200 and lengthen shutter speed to gather more light
                         targetIso = 3200;
-                        targetShutterNs = (int64_t)(targetExpVal / 3200.0);
+                        int64_t lowlightShutterNs = (int64_t)(targetExpVal / 3200.0);
+                        // Snap low-light shutter to flicker period too
+                        if (mAntiFlickerHz == 50 || mAntiFlickerHz == 60) {
+                            int64_t flickerPeriodNs = 1000000000LL / (2 * mAntiFlickerHz);
+                            int64_t multiples = (lowlightShutterNs + flickerPeriodNs / 2) / flickerPeriodNs;
+                            if (multiples < 1) multiples = 1;
+                            lowlightShutterNs = multiples * flickerPeriodNs;
+                        }
+                        targetShutterNs = lowlightShutterNs;
                     }
 
                     // Safety clamps: Shutter cannot be longer than 360-degree (1 / FPS) and cannot be shorter than hardware limits (1/8000s)
