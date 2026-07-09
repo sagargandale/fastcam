@@ -58,13 +58,12 @@ float shadowLift(float x, float lift) {
     return x + lift * pow(1.0 - x, 4.0);
 }
 
-// Highlight roll-off: compresses values above 0.5 gracefully to prevent blown-out areas
+// Highlight roll-off: compresses values above 0.5 gracefully — branchless via step/mix
+// to eliminate GPU warp divergence on mobile Adreno/Mali architectures.
 float highlightCompress(float x) {
-    if (x > 0.5) {
-        float overshoot = x - 0.5;
-        return 0.5 + overshoot / (1.0 + overshoot * 1.5);
-    }
-    return x;
+    float overshoot = max(0.0, x - 0.5);
+    float compressed = 0.5 + overshoot / (1.0 + overshoot * 1.5);
+    return mix(x, compressed, step(0.5, x));
 }
 
 void main() {
@@ -299,6 +298,9 @@ void GlRenderer::releaseGl() {
     if (mLumaFbo) { glDeleteFramebuffers(1, &mLumaFbo); mLumaFbo = 0; }
     if (mQuadVbo) { glDeleteBuffers(1, &mQuadVbo); mQuadVbo = 0; }
     if (mQuadVao) { glDeleteVertexArrays(1, &mQuadVao); mQuadVao = 0; }
+    if (mLumaPbo[0]) { glDeleteBuffers(2, mLumaPbo); mLumaPbo[0] = 0; mLumaPbo[1] = 0; }
+    mPboReady = false;
+    mPboIndex = 0;
     LOGI("GL resources released.");
 }
 
@@ -399,37 +401,54 @@ void GlRenderer::renderQuad(float shiftX, float shiftY, bool rotate, bool isFron
 }
 
 float GlRenderer::readAverageLuma() {
+    // PBO double-buffering for async luminance readback:
+    // - Frame N: issue DMA transfer into mLumaPbo[writeIdx] (non-blocking)
+    // - Frame N+1: map mLumaPbo[readIdx] to get frame N's data (GPU DMA complete by now)
+    int writeIdx = mPboIndex;
+    int readIdx  = 1 - mPboIndex;
+    mPboIndex    = readIdx; // Alternate for next frame
+
+    // Issue async GPU→CPU DMA transfer of the luma FBO into the write PBO
     glBindFramebuffer(GL_FRAMEBUFFER, mLumaFbo);
-
-    // Read the downscaled luminance pixels
-    uint8_t pixels[LUMA_SIZE * LUMA_SIZE * 4];
-    glReadPixels(0, 0, LUMA_SIZE, LUMA_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, pixels);
-
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, mLumaPbo[writeIdx]);
+    glReadPixels(0, 0, LUMA_SIZE, LUMA_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (!mPboReady) {
+        // First frame: PBO[readIdx] has no data yet, return neutral luma
+        mPboReady = true;
+        return 0.5f;
+    }
+
+    // Map the PBO written in the PREVIOUS frame (DMA should be complete by now)
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, mLumaPbo[readIdx]);
+    const uint8_t* pixels = (const uint8_t*)glMapBufferRange(
+        GL_PIXEL_PACK_BUFFER, 0, LUMA_SIZE * LUMA_SIZE * 4, GL_MAP_READ_BIT);
 
     float weightedSum = 0.0f;
     float totalWeight = 0.0f;
 
-    for (int row = 0; row < LUMA_SIZE; ++row) {
-        for (int col = 0; col < LUMA_SIZE; ++col) {
-            int i = row * LUMA_SIZE + col;
+    if (pixels) {
+        for (int row = 0; row < LUMA_SIZE; ++row) {
+            for (int col = 0; col < LUMA_SIZE; ++col) {
+                int i = row * LUMA_SIZE + col;
 
-            // Calculate distance from center (7.5, 7.5)
-            float dx = (float)col - 7.5f;
-            float dy = (float)row - 7.5f;
-            float distSq = dx * dx + dy * dy;
-            float maxDistSq = 112.5f; // 7.5^2 + 7.5^2
+                // Center-weighted metering (1.0 at center, 0.3 at corners)
+                float dx = (float)col - 7.5f;
+                float dy = (float)row - 7.5f;
+                float distSq = dx * dx + dy * dy;
+                float weight = 1.0f - 0.7f * (distSq / 112.5f);
 
-            // Center-weighted factor (ranges from 1.0 at center to 0.3 at corners)
-            float weight = 1.0f - 0.7f * (distSq / maxDistSq);
-
-            // Read Rec.709 luminance from red channel (already converted in shader)
-            float luma = pixels[i * 4] / 255.0f;
-
-            weightedSum += luma * weight;
-            totalWeight += weight;
+                // Rec.709 luminance from red channel (already greyscale from luma shader)
+                float luma = pixels[i * 4] / 255.0f;
+                weightedSum += luma * weight;
+                totalWeight += weight;
+            }
         }
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
     }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 
     return (totalWeight > 0.0f) ? (weightedSum / totalWeight) : 0.0f;
 }
@@ -520,7 +539,17 @@ bool GlRenderer::createLumaFbo() {
         return false;
     }
 
-    LOGI("Luminance readback FBO created (%dx%d).", LUMA_SIZE, LUMA_SIZE);
+    // Create two PBOs for async GPU→CPU DMA readback (eliminates glReadPixels pipeline stall)
+    glGenBuffers(2, mLumaPbo);
+    for (int i = 0; i < 2; i++) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, mLumaPbo[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, LUMA_SIZE * LUMA_SIZE * 4, nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    mPboIndex = 0;
+    mPboReady = false;
+
+    LOGI("Luminance readback FBO + PBO created (%dx%d).", LUMA_SIZE, LUMA_SIZE);
     return true;
 }
 

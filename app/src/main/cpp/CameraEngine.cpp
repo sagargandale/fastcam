@@ -178,6 +178,18 @@ bool CameraEngine::findRearCamera() {
         if (facing == ACAMERA_LENS_FACING_BACK && mCameraId.empty()) {
             mCameraId = id;
             mActiveLensFacing = facing;
+
+            // Cache sensor active array size once to avoid repeated IPC calls
+            ACameraMetadata_const_entry arrayEntry;
+            if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &arrayEntry) == ACAMERA_OK
+                    && arrayEntry.count == 4) {
+                mSensorArrayLeft   = arrayEntry.data.i32[0];
+                mSensorArrayTop    = arrayEntry.data.i32[1];
+                mSensorArrayWidth  = arrayEntry.data.i32[2] - arrayEntry.data.i32[0];
+                mSensorArrayHeight = arrayEntry.data.i32[3] - arrayEntry.data.i32[1];
+                LOGI("Sensor active array: left=%d top=%d w=%d h=%d",
+                     mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight);
+            }
         }
 
         ACameraMetadata_free(chars);
@@ -186,6 +198,7 @@ bool CameraEngine::findRearCamera() {
 }
 
 std::vector<CameraLensInfo> CameraEngine::getAvailableLenses() {
+    std::lock_guard<std::mutex> lock(mCameraMutex);
     if (mLenses.empty()) {
         findRearCamera();
     }
@@ -193,33 +206,48 @@ std::vector<CameraLensInfo> CameraEngine::getAvailableLenses() {
 }
 
 void CameraEngine::setLens(const std::string& lensId) {
-    std::lock_guard<std::mutex> lock(mCameraMutex);
     if (mCameraId == lensId) return;
 
     LOGI("Switching lens to: %s", lensId.c_str());
-    mCameraId = lensId;
 
-    // Track active lens facing direction
+    // Stop the loop thread BEFORE acquiring mCameraMutex to prevent deadlock.
+    // cameraLoop() acquires mCameraMutex internally for AE updates; joining
+    // while holding it would deadlock the camera and UI threads.
+    stopLoopThread();
+
+    std::lock_guard<std::mutex> lock(mCameraMutex);
+
+    mCameraId = lensId;
+    // Update active lens facing direction and refresh sensor array cache
     for (const auto& lens : mLenses) {
         if (lens.id == lensId) {
             mActiveLensFacing = lens.facing;
             break;
         }
     }
+    // Refresh cached sensor array for the newly selected lens
+    ACameraMetadata* chars = nullptr;
+    if (ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars) == ACAMERA_OK && chars) {
+        ACameraMetadata_const_entry arrayEntry;
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &arrayEntry) == ACAMERA_OK
+                && arrayEntry.count == 4) {
+            mSensorArrayLeft   = arrayEntry.data.i32[0];
+            mSensorArrayTop    = arrayEntry.data.i32[1];
+            mSensorArrayWidth  = arrayEntry.data.i32[2] - arrayEntry.data.i32[0];
+            mSensorArrayHeight = arrayEntry.data.i32[3] - arrayEntry.data.i32[1];
+        }
+        ACameraMetadata_free(chars);
+    }
 
     // If camera is already open, recreate session dynamically
     if (mCameraDevice) {
-        // Stop current capture session and loop
-        stopLoopThread();
         if (mCaptureSession) {
             ACameraCaptureSession_stopRepeating(mCaptureSession);
             ACameraCaptureSession_close(mCaptureSession);
             mCaptureSession = nullptr;
         }
-        if (mCameraDevice) {
-            ACameraDevice_close(mCameraDevice);
-            mCameraDevice = nullptr;
-        }
+        ACameraDevice_close(mCameraDevice);
+        mCameraDevice = nullptr;
 
         // Open new camera lens device
         ACameraDevice_StateCallbacks deviceCallbacks{
@@ -461,39 +489,45 @@ void CameraEngine::notifyFrameAvailable() {
 }
 
 void CameraEngine::startRecording(int fd, int rotationDegrees) {
-    std::lock_guard<std::mutex> lock(mCameraMutex);
+    std::lock_guard<std::mutex> cameraLock(mCameraMutex);
     if (mIsRecording) return;
 
     LOGI("Starting hardware recording to fd: %d (Res: %dx%d, rotation: %d)", fd, mWidth, mHeight, rotationDegrees);
 
     mVideoRotation = rotationDegrees;
-    mMediaEncoder = std::make_unique<MediaEncoder>();
+    auto encoder = std::make_unique<MediaEncoder>();
     // Set 60 Mbps for 4K / 35 Mbps for 1080p for exceptional detail retention
     int bitrate = (mWidth >= 3840) ? 60000000 : 35000000;
-    
-    if (mMediaEncoder->configure(fd, mWidth, mHeight, bitrate, mTargetFps, rotationDegrees, 44100, 2)) {
-        mMediaEncoder->start();
-        mGlRenderer->createEncoderSurface(mMediaEncoder->getEncoderWindow());
+
+    if (encoder->configure(fd, mWidth, mHeight, bitrate, mTargetFps, rotationDegrees, 44100, 2)) {
+        encoder->start();
+        mGlRenderer->createEncoderSurface(encoder->getEncoderWindow());
+        {
+            std::lock_guard<std::mutex> encLock(mEncoderMutex);
+            mMediaEncoder = std::move(encoder);
+        }
         mIsRecording = true;
     } else {
         LOGE("Failed to configure hardware MediaEncoder!");
-        mMediaEncoder.reset();
         close(fd);
     }
 }
 
 void CameraEngine::stopRecording() {
-    std::lock_guard<std::mutex> lock(mCameraMutex);
+    std::lock_guard<std::mutex> cameraLock(mCameraMutex);
     if (!mIsRecording) return;
 
     LOGI("Stopping hardware recording.");
-    
     mIsRecording = false;
-    
-    if (mMediaEncoder) {
-        mMediaEncoder->stop();
+
+    std::unique_ptr<MediaEncoder> enc;
+    {
+        std::lock_guard<std::mutex> encLock(mEncoderMutex);
+        enc = std::move(mMediaEncoder); // Transfer ownership; mMediaEncoder is now null
+    }
+    if (enc) {
+        enc->stop();
         mGlRenderer->destroyEncoderSurface();
-        mMediaEncoder.reset();
     }
 }
 
@@ -612,8 +646,8 @@ void CameraEngine::initGyroscope() {
     mSensorEventQueue = ASensorManager_createEventQueue(mSensorManager, mLooper, 0, nullptr, nullptr);
     ASensorEventQueue_enableSensor(mSensorEventQueue, mGyroSensor);
     
-    // Sample Gyroscope at 100Hz (10ms interval)
-    ASensorEventQueue_setEventRate(mSensorEventQueue, mGyroSensor, 10000);
+    // Sample gyroscope at camera frame rate to avoid wasted samples between renders
+    ASensorEventQueue_setEventRate(mSensorEventQueue, mGyroSensor, 1000000 / std::max(24, mTargetFps));
     mLastGyroTimestamp = 0;
     mGyroX = 0.0f;
     mGyroY = 0.0f;
@@ -639,10 +673,11 @@ void CameraEngine::cameraLoop() {
     initGyroscope();
 
     auto nextFrameTime = std::chrono::steady_clock::now();
-    int frameIntervalUs = 1000000 / mTargetFps;
     int aeFrameCounter = 0;
     
     while (mIsLoopRunning) {
+        // Recompute interval each iteration so FPS changes take effect immediately
+        int frameIntervalUs = 1000000 / std::max(1, (int)mTargetFps);
         nextFrameTime += std::chrono::microseconds(frameIntervalUs);
 
         // 1. Process Gyroscope EIS offset integration
@@ -819,83 +854,63 @@ void CameraEngine::setFrameRate(int32_t fps) {
 
 void CameraEngine::setZoom(float ratio) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
-    if (!mCaptureRequest || !mCameraManager || mCameraId.empty()) return;
+    if (!mCaptureRequest) return;
 
     mZoomRatio = std::max(1.0f, std::min(ratio, 8.0f));
 
-    ACameraMetadata* chars = nullptr;
-    ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars);
+    // Use cached sensor array to avoid live IPC call to camera service
+    int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
+    int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
+    int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
+    int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
 
-    ACameraMetadata_const_entry entry;
-    if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &entry) == ACAMERA_OK && entry.count == 4) {
-        int32_t arrayLeft = entry.data.i32[0];
-        int32_t arrayTop = entry.data.i32[1];
-        int32_t arrayRight = entry.data.i32[2];
-        int32_t arrayBottom = entry.data.i32[3];
-
-        int32_t fullW = arrayRight - arrayLeft;
-        int32_t fullH = arrayBottom - arrayTop;
-
-        int32_t cropW = (int32_t)(fullW / mZoomRatio);
-        int32_t cropH = (int32_t)(fullH / mZoomRatio);
-        int32_t cropL = arrayLeft + (fullW - cropW) / 2;
-        int32_t cropT = arrayTop + (fullH - cropH) / 2;
-
-        int32_t cropRegion[4] = {cropL, cropT, cropW, cropH};
-        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
-    }
-    ACameraMetadata_free(chars);
+    int32_t cropRegion[4] = {cropL, cropT, cropW, cropH};
+    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
 
     updateRepeatingRequest();
 }
 
 void CameraEngine::setFocusPoint(float x, float y, int viewWidth, int viewHeight) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
-    if (!mCaptureRequest || !mCameraManager || mCameraId.empty()) return;
+    if (!mCaptureRequest) return;
 
-    ACameraMetadata* chars = nullptr;
-    ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars);
+    // Use cached sensor array to avoid live IPC call to camera service
+    int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
+    int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
+    int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
+    int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
 
-    ACameraMetadata_const_entry entry;
-    if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &entry) == ACAMERA_OK && entry.count == 4) {
-        int32_t arrayLeft = entry.data.i32[0];
-        int32_t arrayTop = entry.data.i32[1];
-        int32_t arrayRight = entry.data.i32[2];
-        int32_t arrayBottom = entry.data.i32[3];
+    float nx = std::max(0.0f, std::min(1.0f, x / (float)viewWidth));
+    float ny = std::max(0.0f, std::min(1.0f, y / (float)viewHeight));
 
-        int32_t fullW = arrayRight - arrayLeft;
-        int32_t fullH = arrayBottom - arrayTop;
-
-        int32_t cropW = (int32_t)(fullW / mZoomRatio);
-        int32_t cropH = (int32_t)(fullH / mZoomRatio);
-        int32_t cropL = arrayLeft + (fullW - cropW) / 2;
-        int32_t cropT = arrayTop + (fullH - cropH) / 2;
-
-        float nx = std::max(0.0f, std::min(1.0f, x / (float)viewWidth));
-        float ny = std::max(0.0f, std::min(1.0f, y / (float)viewHeight));
-
-        // Coordinate mapping for landscape sensor alignment (assuming 90deg view rotation)
-        int32_t sensorX = cropL + (int32_t)(ny * cropW);
-        int32_t sensorY = cropT + (int32_t)((1.0f - nx) * cropH);
-
-        int32_t halfW = cropW / 20;
-        int32_t halfH = cropH / 20;
-
-        int32_t box[5] = {
-            std::max(cropL, sensorX - halfW),
-            std::max(cropT, sensorY - halfH),
-            std::min(cropL + cropW, sensorX + halfW),
-            std::min(cropT + cropH, sensorY + halfH),
-            1000 // Focus region weight
-        };
-
-        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AF_REGIONS, 5, box);
-        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AE_REGIONS, 5, box);
-
-        uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_START;
-        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
+    // Sensor coordinate mapping depends on camera facing direction.
+    // Back camera (sensor orientation 90°): portrait x→sensorY, portrait y→sensorX
+    // Front camera (sensor orientation 270°): axes are mirrored.
+    int32_t sensorX, sensorY;
+    if (mActiveLensFacing == ACAMERA_LENS_FACING_FRONT) {
+        sensorX = cropL + (int32_t)((1.0f - ny) * cropW);
+        sensorY = cropT + (int32_t)(nx * cropH);
+    } else {
+        sensorX = cropL + (int32_t)(ny * cropW);
+        sensorY = cropT + (int32_t)((1.0f - nx) * cropH);
     }
-    ACameraMetadata_free(chars);
+
+    int32_t halfW = cropW / 20;
+    int32_t halfH = cropH / 20;
+
+    int32_t box[5] = {
+        std::max(cropL, sensorX - halfW),
+        std::max(cropT, sensorY - halfH),
+        std::min(cropL + cropW, sensorX + halfW),
+        std::min(cropT + cropH, sensorY + halfH),
+        1000 // Focus region weight
+    };
+
+    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AF_REGIONS, 5, box);
+    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AE_REGIONS, 5, box);
+
+    uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_START;
+    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
 
     updateRepeatingRequest();
 }
@@ -920,8 +935,11 @@ void CameraEngine::setNoiseReduction(uint8_t mode) {
 }
 
 void CameraEngine::pushAudioFrame(const uint8_t* data, int size) {
-    std::lock_guard<std::mutex> lock(mCameraMutex);
-    if (mIsRecording && mMediaEncoder) {
+    // Guard with mEncoderMutex only (NOT mCameraMutex) so audio capture
+    // does not contend with camera configuration updates on every audio frame.
+    if (!mIsRecording) return;
+    std::lock_guard<std::mutex> lock(mEncoderMutex);
+    if (mMediaEncoder) {
         mMediaEncoder->encodeAudioFrame(data, size);
     }
 }
@@ -967,6 +985,10 @@ void CameraEngine::closeCamera() {
     }
 
     if (mGlRenderer) {
+        // Bind EGL context to the calling thread before issuing GL delete calls.
+        // After stopLoopThread(), the loop thread (which had EGL current) has exited.
+        // GL resource deletion requires a valid current context on the calling thread.
+        mGlRenderer->bindEgl();
         mGlRenderer->releaseGl();
         mGlRenderer->releaseEgl();
         mGlRenderer.reset();

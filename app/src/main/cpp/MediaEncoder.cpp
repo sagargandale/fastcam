@@ -203,9 +203,12 @@ void MediaEncoder::encodeAudioFrame(const uint8_t* data, int size) {
 }
 
 void MediaEncoder::videoEncoderLoop() {
+    // Instead of polling with a 5ms sleep, use a blocking dequeue timeout matching
+    // the frame interval (~16ms @ 60fps). drainVideo() already handles timeouts gracefully.
     while (mVideoRunning) {
         drainVideo();
-        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        // Short yield to allow surface writes to pipeline before trying again
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     // Flush remaining frames
     drainVideo();

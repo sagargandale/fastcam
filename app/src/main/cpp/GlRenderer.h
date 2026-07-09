@@ -82,6 +82,12 @@ private:
     int mPreviewHeight = 0;
     int64_t mRecordingStartTimestampNs = -1;
     bool mHdrEnabled = false;
+
+    // PBO double-buffer for asynchronous luminance readback.
+    // Eliminates GPU pipeline stall: issue DMA on frame N, read result on frame N+1.
+    GLuint mLumaPbo[2] = {0, 0};
+    int  mPboIndex  = 0;    // Write index (0 or 1, alternates each frame)
+    bool mPboReady  = false; // False until first PBO write is issued
 };
 
 #endif // GL_RENDERER_H

@@ -153,7 +153,17 @@ private:
 
     // Exposure calculations
     std::mutex mCameraMutex;
+    // Dedicated mutex for encoder/audio access — avoids blocking camera loop
+    // during audio capture. Lock order: always mCameraMutex then mEncoderMutex.
+    std::mutex mEncoderMutex;
     float mLastLuma = 0.5f; // Initial luminance guess (neutral)
+
+    // Cached sensor active array size — populated once in findRearCamera().
+    // Avoids repeated ACameraManager_getCameraCharacteristics() IPC calls.
+    int32_t mSensorArrayLeft   = 0;
+    int32_t mSensorArrayTop    = 0;
+    int32_t mSensorArrayWidth  = 4000; // Safe fallback (4K sensor)
+    int32_t mSensorArrayHeight = 3000; // Safe fallback
 
     // Cached lenses list
     std::vector<CameraLensInfo> mLenses;

@@ -175,9 +175,10 @@ fun CameraScreen(
 
     fun handleStartStopRecording() {
         if (isRecording) {
-            // Stop recording
-            NativeBridge.nativeStopRecording()
+            // Stop audio capture FIRST (joins the capture thread) so no pushAudioFrame()
+            // calls race with MediaEncoder teardown inside nativeStopRecording().
             audioCapture.stop()
+            NativeBridge.nativeStopRecording()
             isRecording = false
         } else {
             // Start recording
@@ -542,13 +543,4 @@ fun CameraScreen(
         }
     }
 }
-
-// Create file handle for video recording output
-private fun createOutputFile(context: Context): File? {
-    val timeStamp = SimpleDateFormat("yyyyMMdd_HHmmss", Locale.getDefault()).format(Date())
-    val dir = context.getExternalFilesDir(Environment.DIRECTORY_MOVIES) ?: return null
-    if (!dir.exists() && !dir.mkdirs()) return null
-    return File(dir, "FASTCAM_${timeStamp}.mp4")
-}
-
 

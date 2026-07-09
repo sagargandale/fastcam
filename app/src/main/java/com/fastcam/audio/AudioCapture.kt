@@ -54,13 +54,19 @@ class AudioCapture {
         captureThread = thread(start = true, name = "fastcam-audio-capture") {
             val chunkSize = 2048
             val buffer = ByteArray(chunkSize)
+            var consecutiveErrors = 0
             while (isRecording) {
                 val bytesRead = audioRecord?.read(buffer, 0, buffer.size) ?: 0
                 if (bytesRead > 0) {
+                    consecutiveErrors = 0
                     NativeBridge.nativePushAudioFrame(buffer, bytesRead)
                 } else if (bytesRead < 0) {
-                    Log.e(TAG, "Error reading audio data: $bytesRead")
-                    break
+                    Log.e(TAG, "AudioRecord read error: $bytesRead (consecutive: ${++consecutiveErrors})")
+                    // Only abort on 10 consecutive failures — transient errors should not kill audio
+                    if (consecutiveErrors >= 10) {
+                        Log.e(TAG, "Too many consecutive errors, stopping audio capture")
+                        break
+                    }
                 }
             }
         }
