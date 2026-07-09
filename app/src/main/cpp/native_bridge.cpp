@@ -43,10 +43,10 @@ Java_com_fastcam_engine_NativeBridge_nativeInit(JNIEnv* env, jobject thiz, jobje
 }
 
 JNIEXPORT void JNICALL
-Java_com_fastcam_engine_NativeBridge_nativeStartRecording(JNIEnv* env, jobject thiz, jint fd) {
+Java_com_fastcam_engine_NativeBridge_nativeStartRecording(JNIEnv* env, jobject thiz, jint fd, jint rotation_degrees) {
     (void)env; (void)thiz;
     if (gEngine) {
-        gEngine->startRecording(fd);
+        gEngine->startRecording(fd, rotation_degrees);
     }
 }
 
@@ -241,6 +241,14 @@ Java_com_fastcam_engine_NativeBridge_nativeLockAe(JNIEnv* env, jobject thiz, jbo
     (void)env; (void)thiz;
     if (gEngine) {
         gEngine->lockAe(lock);
+    }
+}
+
+JNIEXPORT void JNICALL
+Java_com_fastcam_engine_NativeBridge_nativeSetHdrEnabled(JNIEnv* env, jobject thiz, jboolean enabled) {
+    (void)env; (void)thiz;
+    if (gEngine) {
+        gEngine->setHdrEnabled(enabled);
     }
 }
 

@@ -51,3 +51,16 @@
 1503	1659	8047868483642954	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af
 5	1191	8047869038231434	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	fb36bfbbef002cf4
 1191	1277	8047869039141051	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af
+100	2520	8050256263343512	CMakeFiles/fastcam-engine.dir/GlRenderer.cpp.o	5d00ad035a1d2778
+11	1028	8050256775712115	CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o	e314f72849c7f276
+5	1273	8050256778134384	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	fb36bfbbef002cf4
+1274	1612	8050256781570769	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af
+13	1374	8050265114368205	CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o	e314f72849c7f276
+19	1637	8050265116948174	CMakeFiles/fastcam-engine.dir/MediaEncoder.cpp.o	a554be79b311b611
+6	1673	8050265117298144	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	fb36bfbbef002cf4
+1673	1790	8050265118635390	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af
+5	269	8050270474156265	CMakeFiles/fastcam-engine.dir/GlRenderer.cpp.o	5d00ad035a1d2778
+269	376	8050270475254027	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af
+5	1020	8050283217052471	CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o	e314f72849c7f276
+10	1238	8050283219213757	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	fb36bfbbef002cf4
+1239	1325	8050283220131038	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/arm64-v8a/libfastcam-engine.so	e5bf477651752af

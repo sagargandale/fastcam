@@ -8,7 +8,7 @@ object NativeBridge {
     }
 
     external fun nativeInit(surface: Surface, width: Int, height: Int, useStabilization: Boolean): Boolean
-    external fun nativeStartRecording(fd: Int)
+    external fun nativeStartRecording(fd: Int, rotationDegrees: Int)
     external fun nativeStopRecording()
     external fun nativeRelease()
     external fun nativeSetMode(isAuto: Boolean)
@@ -18,6 +18,7 @@ object NativeBridge {
     external fun nativeSetAeMode(mode: Int)
     external fun nativeSetAntiFlicker(hz: Int)
     external fun nativeLockAe(lock: Boolean)
+    external fun nativeSetHdrEnabled(enabled: Boolean)
     external fun nativeSetFocus(autoFocus: Boolean, distance: Float)
     external fun nativeSetExposure(autoExposure: Boolean, iso: Int, shutterNs: Long)
     external fun nativeSetFrameRate(fps: Int)

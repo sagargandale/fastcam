@@ -258,6 +258,23 @@ bool CameraEngine::createCaptureSession() {
     sessionCallbacks.onReady = onSessionReady;
     sessionCallbacks.onActive = onSessionActive;
 
+    // Log OIS support for this camera
+    ACameraMetadata* chars = nullptr;
+    ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars);
+    ACameraMetadata_const_entry oisEntry;
+    bool hardwareOisSupported = false;
+    if (ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_OPTICAL_STABILIZATION, &oisEntry) == ACAMERA_OK) {
+        for (uint32_t i = 0; i < oisEntry.count; i++) {
+            if (oisEntry.data.u8[i] == ACAMERA_LENS_OPTICAL_STABILIZATION_MODE_ON) {
+                hardwareOisSupported = true;
+                break;
+            }
+        }
+    }
+    LOGI("Camera %s OIS support check: Available = %d, Requested = %d", 
+         mCameraId.c_str(), hardwareOisSupported, mUseOis);
+    ACameraMetadata_free(chars);
+
     status = ACameraDevice_createCaptureSession(
         mCameraDevice, 
         mOutputContainer, 
@@ -357,7 +374,8 @@ void CameraEngine::applyExposureSettings() {
             ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
             
             // Dynamically update PID target based on exposure compensation value
-            float newTarget = 0.47f * std::pow(1.5f, (float)mExposureCompensation);
+            float baseTarget = mHdrEnabled ? 0.33f : 0.47f;
+            float newTarget = baseTarget * std::pow(1.5f, (float)mExposureCompensation);
             mPidController->setTarget(std::max(0.05f, std::min(newTarget, 0.95f)));
             
             ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SENSOR_SENSITIVITY, 1, &mIso);
@@ -385,7 +403,8 @@ void CameraEngine::applyExposureSettings() {
                 ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_MODE, 1, &aeMode);
                 
                 // Dynamically update PID target based on exposure compensation value
-                float newTarget = 0.47f * std::pow(1.5f, (float)mExposureCompensation);
+                float baseTarget = mHdrEnabled ? 0.33f : 0.47f;
+                float newTarget = baseTarget * std::pow(1.5f, (float)mExposureCompensation);
                 mPidController->setTarget(std::max(0.05f, std::min(newTarget, 0.95f)));
                 
                 ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SENSOR_SENSITIVITY, 1, &mIso);
@@ -441,17 +460,18 @@ void CameraEngine::notifyFrameAvailable() {
     mFrameCondVar.notify_one();
 }
 
-void CameraEngine::startRecording(int fd) {
+void CameraEngine::startRecording(int fd, int rotationDegrees) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
     if (mIsRecording) return;
 
-    LOGI("Starting hardware recording to fd: %d (Res: %dx%d)", fd, mWidth, mHeight);
+    LOGI("Starting hardware recording to fd: %d (Res: %dx%d, rotation: %d)", fd, mWidth, mHeight, rotationDegrees);
 
+    mVideoRotation = rotationDegrees;
     mMediaEncoder = std::make_unique<MediaEncoder>();
     // Set 60 Mbps for 4K / 35 Mbps for 1080p for exceptional detail retention
     int bitrate = (mWidth >= 3840) ? 60000000 : 35000000;
     
-    if (mMediaEncoder->configure(fd, mWidth, mHeight, bitrate, mTargetFps, 44100, 2)) {
+    if (mMediaEncoder->configure(fd, mWidth, mHeight, bitrate, mTargetFps, rotationDegrees, 44100, 2)) {
         mMediaEncoder->start();
         mGlRenderer->createEncoderSurface(mMediaEncoder->getEncoderWindow());
         mIsRecording = true;
@@ -542,6 +562,19 @@ void CameraEngine::lockAe(bool locked) {
         if (mCaptureSession) {
             updateRepeatingRequest();
         }
+    }
+}
+
+void CameraEngine::setHdrEnabled(bool enabled) {
+    LOGI("HDR mode: %s", enabled ? "ENABLED" : "DISABLED");
+    if (mGlRenderer) {
+        mGlRenderer->setHdrEnabled(enabled);
+    }
+    std::lock_guard<std::mutex> lock(mCameraMutex);
+    mHdrEnabled = enabled;
+    if (mCaptureSession && mCaptureRequest) {
+        configureCaptureRequest();
+        updateRepeatingRequest();
     }
 }
 

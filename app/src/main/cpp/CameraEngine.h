@@ -35,7 +35,7 @@ public:
     ~CameraEngine();
 
     bool initCamera(JNIEnv* env, ANativeWindow* previewWindow, int width, int height, bool useStabilization);
-    void startRecording(int fd);
+    void startRecording(int fd, int rotationDegrees = 0);
     void stopRecording();
     void setStabilization(bool enabled);
     void setOis(bool enabled);
@@ -57,7 +57,9 @@ public:
     void pushAudioFrame(const uint8_t* data, int size);
     void setLens(const std::string& lensId);
     std::vector<CameraLensInfo> getAvailableLenses();
+    void setHdrEnabled(bool enabled);
     
+
     // Callback notification
     void notifyFrameAvailable();
 
@@ -128,6 +130,8 @@ private:
     uint8_t mNoiseReductionMode = 1; // Fast
     float mZoomRatio = 1.0f;
     bool mAeLocked = false; // AE/AF lock: freezes auto exposure and autofocus in auto mode
+    int  mVideoRotation = 0; // Rotation hint in degrees for the MP4 container (0, 90, 180, 270)
+    bool mHdrEnabled = false;
 
     // Loop & Synchronization
     std::thread mLoopThread;

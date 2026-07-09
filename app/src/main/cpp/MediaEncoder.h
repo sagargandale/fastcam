@@ -21,7 +21,7 @@ public:
     MediaEncoder();
     ~MediaEncoder();
 
-    bool configure(int fd, int width, int height, int bitrate, int fps, int sampleRate = 44100, int channelCount = 1);
+    bool configure(int fd, int width, int height, int bitrate, int fps, int rotationDegrees = 0, int sampleRate = 44100, int channelCount = 1);
     bool start();
     void stop();
 
@@ -36,6 +36,7 @@ private:
 
     // File writing & muxing
     int mFd = -1;
+    int mRotationDegrees = 0;
     AMediaMuxer* mMuxer = nullptr;
     std::mutex mMuxerMutex;
     std::atomic<bool> mMuxerStarted{false};

@@ -41,6 +41,9 @@ public:
     // Read average luminance from last rendered frame (for PID exposure)
     float readAverageLuma();
 
+    // Enable/disable real-time computational HDR tone-mapping
+    void setHdrEnabled(bool enabled);
+
 private:
     bool createShaderProgram();
     bool createLumaFbo();
@@ -60,8 +63,9 @@ private:
     GLint mUniformTexture = -1;
     GLint mUniformShiftX = -1;
     GLint mUniformShiftY = -1;
-    GLint mUniformRotate = -1;
-    GLint mUniformIsFront = -1;
+    GLint mUniformRotate     = -1;
+    GLint mUniformIsFront    = -1;
+    GLint mUniformHdrEnabled = -1;
     GLuint mQuadVao = 0;
     GLuint mQuadVbo = 0;
 
@@ -77,6 +81,7 @@ private:
     int mPreviewWidth = 0;
     int mPreviewHeight = 0;
     int64_t mRecordingStartTimestampNs = -1;
+    bool mHdrEnabled = false;
 };
 
 #endif // GL_RENDERER_H

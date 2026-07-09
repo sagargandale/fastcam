@@ -50,9 +50,50 @@ static const char* FRAGMENT_SHADER = R"(#version 300 es
 precision mediump float;
 in vec2 vTexCoord;
 uniform samplerExternalOES uTexture;
+uniform float uHdrEnabled;
 out vec4 fragColor;
+
+// Shadow recovery: lifts the dark toe region ONLY (pow-4 falloff protects midtones & highlights)
+float shadowLift(float x, float lift) {
+    return x + lift * pow(1.0 - x, 4.0);
+}
+
+// Highlight roll-off: compresses values above 0.5 gracefully to prevent blown-out areas
+float highlightCompress(float x) {
+    if (x > 0.5) {
+        float overshoot = x - 0.5;
+        return 0.5 + overshoot / (1.0 + overshoot * 1.5);
+    }
+    return x;
+}
+
 void main() {
-    fragColor = texture(uTexture, vTexCoord);
+    vec4 raw = texture(uTexture, vTexCoord);
+    if (uHdrEnabled < 0.5) {
+        fragColor = raw;
+        return;
+    }
+
+    // --- HDR Computational Mode ---
+    // Step 1: Moderate global gain to pull down highlights and avoid overexposed look
+    vec3 color = raw.rgb * 0.90;
+
+    // Step 2: Recover shadow detail in the toe region (protecting midtones)
+    color.r = shadowLift(color.r, 0.15);
+    color.g = shadowLift(color.g, 0.12);
+    color.b = shadowLift(color.b, 0.14);
+
+    // Step 3: Compress highlights above 0.5 smoothly
+    color.r = highlightCompress(color.r);
+    color.g = highlightCompress(color.g);
+    color.b = highlightCompress(color.b);
+
+    // Step 4: Boost saturation for rich, cinematic look
+    float luma = dot(color, vec3(0.2126, 0.7152, 0.0722));
+    color = mix(vec3(luma), color, 1.15);
+    color = clamp(color, 0.0, 1.0);
+
+    fragColor = vec4(color, raw.a);
 })";
 
 // Luminance downscale shader — reads camera texture and outputs grayscale for metering
@@ -346,10 +387,11 @@ void GlRenderer::renderQuad(float shiftX, float shiftY, bool rotate, bool isFron
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, mCameraTextureId);
     glUniform1i(mUniformTexture, 0);
-    glUniform1f(mUniformShiftX, shiftX);
-    glUniform1f(mUniformShiftY, shiftY);
-    glUniform1f(mUniformRotate, rotate ? 1.0f : 0.0f);
-    glUniform1f(mUniformIsFront, isFront ? 1.0f : 0.0f);
+    glUniform1f(mUniformShiftX,     shiftX);
+    glUniform1f(mUniformShiftY,     shiftY);
+    glUniform1f(mUniformRotate,     rotate ? 1.0f : 0.0f);
+    glUniform1f(mUniformIsFront,    isFront ? 1.0f : 0.0f);
+    glUniform1f(mUniformHdrEnabled, mHdrEnabled ? 1.0f : 0.0f);
 
     glBindVertexArray(mQuadVao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -392,6 +434,10 @@ float GlRenderer::readAverageLuma() {
     return (totalWeight > 0.0f) ? (weightedSum / totalWeight) : 0.0f;
 }
 
+void GlRenderer::setHdrEnabled(bool enabled) {
+    mHdrEnabled = enabled;
+}
+
 // ────────────────────────────────────────────────────────────────
 // Shader Compilation
 // ────────────────────────────────────────────────────────────────
@@ -420,11 +466,12 @@ bool GlRenderer::createShaderProgram() {
         return false;
     }
 
-    mUniformTexture = glGetUniformLocation(mShaderProgram, "uTexture");
-    mUniformShiftX = glGetUniformLocation(mShaderProgram, "uShiftX");
-    mUniformShiftY = glGetUniformLocation(mShaderProgram, "uShiftY");
-    mUniformRotate = glGetUniformLocation(mShaderProgram, "uRotate");
-    mUniformIsFront = glGetUniformLocation(mShaderProgram, "uIsFront");
+    mUniformTexture    = glGetUniformLocation(mShaderProgram, "uTexture");
+    mUniformShiftX     = glGetUniformLocation(mShaderProgram, "uShiftX");
+    mUniformShiftY     = glGetUniformLocation(mShaderProgram, "uShiftY");
+    mUniformRotate     = glGetUniformLocation(mShaderProgram, "uRotate");
+    mUniformIsFront    = glGetUniformLocation(mShaderProgram, "uIsFront");
+    mUniformHdrEnabled = glGetUniformLocation(mShaderProgram, "uHdrEnabled");
 
     LOGI("Camera shader program compiled and linked.");
     return true;

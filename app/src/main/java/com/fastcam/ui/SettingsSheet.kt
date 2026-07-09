@@ -3,7 +3,9 @@ package com.fastcam.ui
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -36,7 +38,9 @@ fun SettingsSheet(
     noiseReductionMode: Int,
     onNoiseReductionChange: (Int) -> Unit,
     audioSource: Int,
-    onAudioSourceChange: (Int) -> Unit
+    onAudioSourceChange: (Int) -> Unit,
+    hdrEnabled: Boolean,
+    onHdrChange: (Boolean) -> Unit
 ) {
     ModalBottomSheet(
         onDismissRequest = onDismiss,
@@ -47,6 +51,7 @@ fun SettingsSheet(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(24.dp)
+                .verticalScroll(rememberScrollState())
         ) {
             Text(
                 text = "FastCam Settings",
@@ -366,6 +371,45 @@ fun SettingsSheet(
                     onClick = { onAudioSourceChange(MediaRecorder.AudioSource.UNPROCESSED) }
                 )
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
+
+            // HDR Mode
+            Text(
+                text = "Dynamic Range Mode",
+                fontSize = 14.sp,
+                color = Color.Gray,
+                fontWeight = FontWeight.SemiBold
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "HDR Mode",
+                        fontSize = 16.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = Color.White
+                    )
+                    Text(
+                        text = "Real-time shadow recovery & highlight roll-off",
+                        fontSize = 12.sp,
+                        color = Color.Gray
+                    )
+                }
+                Switch(
+                    checked = hdrEnabled,
+                    onCheckedChange = onHdrChange,
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = MaterialTheme.colorScheme.primary,
+                        checkedTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f)
+                    )
+                )
+            }
+
             Spacer(modifier = Modifier.height(48.dp))
         }
     }

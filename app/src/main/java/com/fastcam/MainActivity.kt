@@ -23,6 +23,7 @@ import android.media.MediaRecorder
 import com.fastcam.ui.CameraScreen
 import com.fastcam.ui.SettingsSheet
 import com.fastcam.ui.theme.FastCamTheme
+import com.fastcam.engine.NativeBridge
 
 class MainActivity : ComponentActivity() {
 
@@ -86,6 +87,7 @@ fun CameraAppContent() {
     var targetFps by remember { mutableIntStateOf(60) }
     var noiseReductionMode by remember { mutableIntStateOf(1) } // 1 = Fast, 0 = Off, 2 = High Quality
     var audioSource by remember { mutableIntStateOf(MediaRecorder.AudioSource.CAMCORDER) }
+    var hdrEnabled by remember { mutableStateOf(false) }
 
     Box(modifier = Modifier.fillMaxSize()) {
         CameraScreen(
@@ -93,7 +95,13 @@ fun CameraAppContent() {
             resolutionWidth = resolutionWidth,
             resolutionHeight = resolutionHeight,
             stabilizationEnabled = stabilizationEnabled,
-            audioSource = audioSource
+            audioSource = audioSource,
+            oisEnabled = oisEnabled,
+            aeMode = aeMode,
+            antiFlickerHz = antiFlickerHz,
+            targetFps = targetFps,
+            noiseReductionMode = noiseReductionMode,
+            hdrEnabled = hdrEnabled
         )
 
         if (showSettings) {
@@ -118,7 +126,12 @@ fun CameraAppContent() {
                 noiseReductionMode = noiseReductionMode,
                 onNoiseReductionChange = { noiseReductionMode = it },
                 audioSource = audioSource,
-                onAudioSourceChange = { audioSource = it }
+                onAudioSourceChange = { audioSource = it },
+                hdrEnabled = hdrEnabled,
+                onHdrChange = { enabled ->
+                    hdrEnabled = enabled
+                    NativeBridge.nativeSetHdrEnabled(enabled)
+                }
             )
         }
     }

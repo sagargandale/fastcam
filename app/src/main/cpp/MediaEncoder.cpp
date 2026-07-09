@@ -13,8 +13,9 @@ MediaEncoder::~MediaEncoder() {
     stop();
 }
 
-bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps, int sampleRate, int channelCount) {
+bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps, int rotationDegrees, int sampleRate, int channelCount) {
     mFd = fd;
+    mRotationDegrees = rotationDegrees;
     mSampleRate = sampleRate;
     mChannelCount = channelCount;
 
@@ -22,6 +23,12 @@ bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps
     if (!mMuxer) {
         LOGE("Failed to create MediaMuxer");
         return false;
+    }
+
+    // Apply orientation hint so media players rotate the video correctly
+    if (rotationDegrees != 0) {
+        AMediaMuxer_setOrientationHint(mMuxer, rotationDegrees);
+        LOGI("MediaMuxer orientation hint set: %d degrees", rotationDegrees);
     }
 
     // 1. Configure Video Encoder (H.264)

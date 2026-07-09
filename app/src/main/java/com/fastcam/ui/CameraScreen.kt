@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Surface
 import android.view.SurfaceHolder
 import android.view.SurfaceView
+import android.view.OrientationEventListener
 import androidx.compose.animation.core.*
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
@@ -54,7 +55,13 @@ fun CameraScreen(
     resolutionWidth: Int,
     resolutionHeight: Int,
     stabilizationEnabled: Boolean,
-    audioSource: Int
+    audioSource: Int,
+    oisEnabled: Boolean,
+    aeMode: Int,
+    antiFlickerHz: Int,
+    targetFps: Int,
+    noiseReductionMode: Int,
+    hdrEnabled: Boolean
 ) {
     val context = LocalContext.current
     val coroutineScope = rememberCoroutineScope()
@@ -103,14 +110,26 @@ fun CameraScreen(
         }
     }
 
-    // Trigger JNI Re-init when surface or resolution parameters change
-    LaunchedEffect(surfaceObj, resolutionWidth, resolutionHeight, stabilizationEnabled) {
+    // Trigger JNI Re-init and sync all settings states dynamically to the C++ engine
+    LaunchedEffect(
+        surfaceObj, resolutionWidth, resolutionHeight, stabilizationEnabled,
+        oisEnabled, aeMode, antiFlickerHz, targetFps, noiseReductionMode, hdrEnabled
+    ) {
         val s = surfaceObj
         if (s != null) {
             NativeBridge.nativeInit(s, resolutionWidth, resolutionHeight, stabilizationEnabled)
-            // Apply current mode settings to native engine
+            // Apply all current parameters to newly re-created engine
+            NativeBridge.nativeSetOis(oisEnabled)
+            NativeBridge.nativeSetAeMode(aeMode)
+            NativeBridge.nativeSetAntiFlicker(antiFlickerHz)
+            NativeBridge.nativeSetFrameRate(targetFps)
+            NativeBridge.nativeSetNoiseReduction(noiseReductionMode.toByte())
+            NativeBridge.nativeSetHdrEnabled(hdrEnabled)
             NativeBridge.nativeSetMode(!isManualMode)
             NativeBridge.nativeSetZoom(zoomRatio)
+            if (aeLocked) {
+                NativeBridge.nativeLockAe(true)
+            }
         }
     }
 
@@ -122,6 +141,35 @@ fun CameraScreen(
                 delay(1000)
                 recordingSeconds++
             }
+        }
+    }
+
+    // Physical Device Orientation Tracker
+    var deviceOrientationDegrees by remember { mutableIntStateOf(0) }
+    val orientationEventListener = remember {
+        object : OrientationEventListener(context) {
+            override fun onOrientationChanged(orientation: Int) {
+                if (orientation == ORIENTATION_UNKNOWN) return
+                // Map raw degrees (0-359) to nearest 90-degree quadrant
+                val rotation = when (orientation) {
+                    in 45 until 135 -> 270 // Landscape Right
+                    in 135 until 225 -> 180 // Portrait Upside Down
+                    in 225 until 315 -> 90 // Landscape Left
+                    else -> 0 // Portrait
+                }
+                if (rotation != deviceOrientationDegrees) {
+                    deviceOrientationDegrees = rotation
+                }
+            }
+        }
+    }
+
+    DisposableEffect(orientationEventListener) {
+        if (orientationEventListener.canDetectOrientation()) {
+            orientationEventListener.enable()
+        }
+        onDispose {
+            orientationEventListener.disable()
         }
     }
 
@@ -145,7 +193,17 @@ fun CameraScreen(
                 try {
                     val pfd = resolver.openFileDescriptor(videoUri, "rw")
                     if (pfd != null) {
-                        NativeBridge.nativeStartRecording(pfd.detachFd())
+                        // Compute final video rotation
+                        val activeLens = availableLenses.getOrNull(activeLensIndex)
+                        val facing = activeLens?.facing ?: 1 // Default to back camera
+                        val sensorOrientation = if (facing == 0) 270 else 90
+                        val rotationDegrees = if (facing == 0) {
+                            (sensorOrientation + deviceOrientationDegrees) % 360
+                        } else {
+                            (sensorOrientation - deviceOrientationDegrees + 360) % 360
+                        }
+
+                        NativeBridge.nativeStartRecording(pfd.detachFd(), rotationDegrees)
                         audioCapture.audioSource = audioSource
                         audioCapture.start()
                         isRecording = true
@@ -186,7 +244,8 @@ fun CameraScreen(
                 }
             },
             modifier = Modifier
-                .fillMaxSize()
+                .aspectRatio(resolutionHeight.toFloat() / resolutionWidth.toFloat())
+                .align(Alignment.Center)
                 .pointerInput(Unit) {
                     detectTransformGestures { _, _, zoom, _ ->
                         val newZoom = (zoomRatio * zoom).coerceIn(1.0f, 8.0f)
@@ -231,7 +290,11 @@ fun CameraScreen(
 
         // Focus ring animation canvas
         focusTapPoint?.let { point ->
-            Canvas(modifier = Modifier.fillMaxSize()) {
+            Canvas(
+                modifier = Modifier
+                    .aspectRatio(resolutionHeight.toFloat() / resolutionWidth.toFloat())
+                    .align(Alignment.Center)
+            ) {
                 drawCircle(
                     color = Color(0xFFFFB300),
                     radius = 35.dp.toPx() * focusRingScale.value,
