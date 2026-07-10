@@ -404,6 +404,14 @@ bool CameraEngine::configureCaptureRequest() {
         ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibanding);
     }
 
+    // Apply zoom crop region (otherwise zoom is lost when reconfiguring other capture request parameters)
+    int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
+    int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
+    int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
+    int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
+    int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
+    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
+
     return true;
 }
 
@@ -947,21 +955,11 @@ void CameraEngine::setFrameRate(int32_t fps) {
 
 void CameraEngine::setZoom(float ratio) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
-    if (!mCaptureRequest) return;
-
     mZoomRatio = std::max(1.0f, std::min(ratio, 8.0f));
-
-    // Use cached sensor array to avoid live IPC call to camera service
-    int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
-    int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
-    int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
-    int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
-
-    // ACAMERA_SCALER_CROP_REGION expects [left, top, right, bottom] absolute pixel coords
-    int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
-    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
-
-    updateRepeatingRequest();
+    if (mCaptureRequest) {
+        configureCaptureRequest();
+        updateRepeatingRequest();
+    }
 }
 
 void CameraEngine::setFocusPoint(float x, float y, int viewWidth, int viewHeight) {
