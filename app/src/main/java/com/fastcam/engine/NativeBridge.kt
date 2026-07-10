@@ -28,5 +28,6 @@ object NativeBridge {
     external fun nativeSetExposureCompensation(value: Int)
     external fun nativePushAudioFrame(data: ByteArray, size: Int)
     external fun nativeSetLens(lensId: String)
+    external fun nativeGetHistogram(): IntArray
     external fun nativeGetAvailableLenses(): Array<CameraLens>
 }

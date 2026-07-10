@@ -82,6 +82,21 @@ fun CameraScreen(
     
     // Zoom control
     var zoomRatio by remember { mutableFloatStateOf(1.0f) }
+
+    var histogramBins by remember { mutableStateOf(IntArray(64)) }
+
+    // Periodically fetch histogram data (every 50ms = 20fps)
+    LaunchedEffect(surfaceObj) {
+        if (surfaceObj != null) {
+            while (true) {
+                val bins = withContext(Dispatchers.IO) { NativeBridge.nativeGetHistogram() }
+                histogramBins = bins
+                delay(50)
+            }
+        } else {
+            histogramBins = IntArray(64)
+        }
+    }
     
     // Active Lens Selection
     var availableLenses by remember { mutableStateOf<Array<CameraLens>>(emptyArray()) }
@@ -606,6 +621,77 @@ fun CameraScreen(
                 }
             }
         }
+
+        // Histogram Overlay (Blackmagic Style)
+        HistogramOverlay(
+            bins = histogramBins,
+            modifier = Modifier
+                .padding(start = 16.dp, bottom = 170.dp)
+                .align(Alignment.BottomStart)
+        )
+    }
+}
+
+@Composable
+fun HistogramOverlay(
+    bins: IntArray,
+    modifier: Modifier = Modifier
+) {
+    Canvas(
+        modifier = modifier
+            .width(160.dp)
+            .height(60.dp)
+            .background(Color(0x44000000), shape = RoundedCornerShape(6.dp))
+            .padding(6.dp)
+    ) {
+        val width = size.width
+        val height = size.height
+        val binCount = bins.size
+        if (binCount == 0) return@Canvas
+
+        val maxVal = (bins.maxOrNull() ?: 1).coerceAtLeast(1).toFloat()
+        val path = androidx.compose.ui.graphics.Path()
+
+        val step = width / (binCount - 1).toFloat()
+
+        for (i in 0 until binCount) {
+            val normalizedHeight = bins[i].toFloat() / maxVal
+            val x = i * step
+            val y = height - (normalizedHeight * (height - 2f))
+
+            if (i == 0) {
+                path.moveTo(x, height)
+                path.lineTo(x, y)
+            } else {
+                path.lineTo(x, y)
+            }
+        }
+        path.lineTo(width, height)
+        path.close()
+
+        // Draw semi-transparent fill
+        drawPath(
+            path = path,
+            color = Color(0x66FFFFFF)
+        )
+
+        // Draw top outline path
+        val strokePath = androidx.compose.ui.graphics.Path()
+        for (i in 0 until binCount) {
+            val normalizedHeight = bins[i].toFloat() / maxVal
+            val x = i * step
+            val y = height - (normalizedHeight * (height - 2f))
+            if (i == 0) {
+                strokePath.moveTo(x, y)
+            } else {
+                strokePath.lineTo(x, y)
+            }
+        }
+        drawPath(
+            path = strokePath,
+            color = Color.White,
+            style = Stroke(width = 1.dp.toPx())
+        )
     }
 }
 

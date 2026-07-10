@@ -1004,6 +1004,14 @@ void CameraEngine::cameraLoop() {
         // 6. Read back hardware downsampled luminance for next PID iteration
         mLastLuma = mGlRenderer->readAverageLuma();
 
+        // 7. Update histogram cached data on the loop thread (holds current EGL context)
+        int32_t tempHist[64];
+        mGlRenderer->getHistogram(tempHist, 64);
+        {
+            std::lock_guard<std::mutex> histLock(mHistMutex);
+            std::memcpy(mHistogramCached, tempHist, sizeof(tempHist));
+        }
+
         // High precision sleep synchronizer
         std::this_thread::sleep_until(nextFrameTime);
     }
@@ -1195,5 +1203,14 @@ void CameraEngine::releaseCamera() {
     if (mCameraIdList) {
         ACameraManager_deleteCameraIdList(mCameraIdList);
         mCameraIdList = nullptr;
+    }
+}
+
+void CameraEngine::getCachedHistogram(int32_t* outBins, int binCount) {
+    std::lock_guard<std::mutex> lock(mHistMutex);
+    int count = std::min(binCount, 64);
+    std::memcpy(outBins, mHistogramCached, count * sizeof(int32_t));
+    if (binCount > 64) {
+        std::memset(outBins + 64, 0, (binCount - 64) * sizeof(int32_t));
     }
 }

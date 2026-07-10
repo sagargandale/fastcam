@@ -82,3 +82,7 @@
 6	1098	8053643914835384	CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o	207774facae9828
 13	1346	8053643917291114	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	9ae415c950d5e238
 1346	1442	8053643918331055	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/armeabi-v7a/libfastcam-engine.so	774c59005e6a6887
+21	1413	8053723482863401	CMakeFiles/fastcam-engine.dir/GlRenderer.cpp.o	e6706443140809a7
+14	1921	8053723487987889	CMakeFiles/fastcam-engine.dir/native_bridge.cpp.o	207774facae9828
+8	2306	8053723491545402	CMakeFiles/fastcam-engine.dir/CameraEngine.cpp.o	9ae415c950d5e238
+2306	2518	8053723493996590	C:/Users/sgandale/Downloads/git/fastcam/app/build/intermediates/cxx/Debug/52z6j6z1/obj/armeabi-v7a/libfastcam-engine.so	774c59005e6a6887

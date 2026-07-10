@@ -249,4 +249,17 @@ Java_com_fastcam_engine_NativeBridge_nativeSetHdrEnabled(JNIEnv* env, jobject th
     }
 }
 
+JNIEXPORT jintArray JNICALL
+Java_com_fastcam_engine_NativeBridge_nativeGetHistogram(JNIEnv* env, jobject thiz) {
+    (void)thiz;
+    jintArray result = env->NewIntArray(64);
+    if (!gEngine) {
+        return result;
+    }
+    jint temp[64];
+    gEngine->getCachedHistogram(temp, 64);
+    env->SetIntArrayRegion(result, 0, 64, temp);
+    return result;
+}
+
 } // extern "C"

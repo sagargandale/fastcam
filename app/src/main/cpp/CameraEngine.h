@@ -59,6 +59,7 @@ public:
     void setLens(const std::string& lensId);
     std::vector<CameraLensInfo> getAvailableLenses();
     void setHdrEnabled(bool enabled);
+    void getCachedHistogram(int32_t* outBins, int binCount);
     
 
     // Callback notification
@@ -173,6 +174,10 @@ private:
     // during audio capture. Lock order: always mCameraMutex then mEncoderMutex.
     std::mutex mEncoderMutex;
     float mLastLuma = 0.5f; // Initial luminance guess (neutral)
+
+    // Histogram cache
+    std::mutex mHistMutex;
+    int32_t mHistogramCached[64] = {0};
 
     // Cached sensor active array size — populated once in findRearCamera().
     // Avoids repeated ACameraManager_getCameraCharacteristics() IPC calls.

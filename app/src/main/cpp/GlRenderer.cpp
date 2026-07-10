@@ -271,6 +271,11 @@ bool GlRenderer::setupGl(int width, int height) {
         return false;
     }
 
+    if (!createHistFbo()) {
+        LOGE("Failed to create histogram readback FBO!");
+        return false;
+    }
+
     // Create full-screen quad VAO/VBO
     glGenVertexArrays(1, &mQuadVao);
     glGenBuffers(1, &mQuadVbo);
@@ -304,6 +309,13 @@ void GlRenderer::releaseGl() {
     if (mLumaPbo[0]) { glDeleteBuffers(2, mLumaPbo); mLumaPbo[0] = 0; mLumaPbo[1] = 0; }
     mPboReady = false;
     mPboIndex = 0;
+
+    if (mHistFbo) { glDeleteFramebuffers(1, &mHistFbo); mHistFbo = 0; }
+    if (mHistTexture) { glDeleteTextures(1, &mHistTexture); mHistTexture = 0; }
+    if (mHistPbo[0]) { glDeleteBuffers(2, mHistPbo); mHistPbo[0] = 0; mHistPbo[1] = 0; }
+    mHistPboReady = false;
+    mHistPboIndex = 0;
+
     LOGI("GL resources released.");
 }
 
@@ -372,6 +384,19 @@ void GlRenderer::renderFrame(float eisShiftX, float eisShiftY, bool recording, i
     glViewport(0, 0, LUMA_SIZE, LUMA_SIZE);
 
     glUseProgram(mLumaProgram);
+    glActiveTexture(GL_TEXTURE0);
+    glBindTexture(GL_TEXTURE_EXTERNAL_OES, mCameraTextureId);
+    glUniform1i(mLumaUniformTexture, 0);
+
+    glBindVertexArray(mQuadVao);
+    glDrawArrays(GL_TRIANGLES, 0, 6);
+    glBindVertexArray(0);
+
+    // 4. Render to histogram FBO for real-time histogram
+    glBindFramebuffer(GL_FRAMEBUFFER, mHistFbo);
+    glViewport(0, 0, HIST_SIZE, HIST_SIZE);
+
+    glUseProgram(mLumaProgram); // Reuse same program to generate grayscale output
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, mCameraTextureId);
     glUniform1i(mLumaUniformTexture, 0);
@@ -579,4 +604,74 @@ GLuint GlRenderer::compileShader(GLenum type, const char* source) {
         return 0;
     }
     return shader;
+}
+
+bool GlRenderer::createHistFbo() {
+    // FBO with RGBA8 texture for histogram downsampling (64x64)
+    glGenFramebuffers(1, &mHistFbo);
+    glGenTextures(1, &mHistTexture);
+
+    glBindTexture(GL_TEXTURE_2D, mHistTexture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, HIST_SIZE, HIST_SIZE, 0, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+    glBindFramebuffer(GL_FRAMEBUFFER, mHistFbo);
+    glFramebufferTexture2D(GL_FRAMEBUFFER, GL_COLOR_ATTACHMENT0, GL_TEXTURE_2D, mHistTexture, 0);
+
+    GLenum status = glCheckFramebufferStatus(GL_FRAMEBUFFER);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (status != GL_FRAMEBUFFER_COMPLETE) {
+        LOGE("Hist FBO incomplete: 0x%x", status);
+        return false;
+    }
+
+    // Create two PBOs for asynchronous readback
+    glGenBuffers(2, mHistPbo);
+    for (int i = 0; i < 2; i++) {
+        glBindBuffer(GL_PIXEL_PACK_BUFFER, mHistPbo[i]);
+        glBufferData(GL_PIXEL_PACK_BUFFER, HIST_SIZE * HIST_SIZE * 4, nullptr, GL_STREAM_READ);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    mHistPboIndex = 0;
+    mHistPboReady = false;
+
+    LOGI("Histogram readback FBO + PBO created (%dx%d).", HIST_SIZE, HIST_SIZE);
+    return true;
+}
+
+void GlRenderer::getHistogram(int32_t* outBins, int binCount) {
+    std::memset(outBins, 0, binCount * sizeof(int32_t));
+
+    int writeIdx = mHistPboIndex;
+    int readIdx  = 1 - mHistPboIndex;
+    mHistPboIndex = readIdx;
+
+    glBindFramebuffer(GL_FRAMEBUFFER, mHistFbo);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, mHistPbo[writeIdx]);
+    glReadPixels(0, 0, HIST_SIZE, HIST_SIZE, GL_RGBA, GL_UNSIGNED_BYTE, nullptr);
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glBindFramebuffer(GL_FRAMEBUFFER, 0);
+
+    if (!mHistPboReady) {
+        mHistPboReady = true;
+        return;
+    }
+
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, mHistPbo[readIdx]);
+    const uint8_t* pixels = (const uint8_t*)glMapBufferRange(
+        GL_PIXEL_PACK_BUFFER, 0, HIST_SIZE * HIST_SIZE * 4, GL_MAP_READ_BIT);
+
+    if (pixels) {
+        for (int i = 0; i < HIST_SIZE * HIST_SIZE; ++i) {
+            float luma = pixels[i * 4] / 255.0f;
+            int bin = (int)(luma * (binCount - 1));
+            if (bin >= 0 && bin < binCount) {
+                outBins[bin]++;
+            }
+        }
+        glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
+    }
+    glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
 }

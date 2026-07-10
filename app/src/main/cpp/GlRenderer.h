@@ -41,6 +41,9 @@ public:
     // Read average luminance from last rendered frame (for PID exposure)
     float readAverageLuma();
 
+    // Compute histogram from last rendered frame
+    void getHistogram(int32_t* outBins, int binCount);
+
     // Enable/disable real-time computational HDR tone-mapping
     void setHdrEnabled(bool enabled);
 
@@ -51,6 +54,7 @@ public:
 private:
     bool createShaderProgram();
     bool createLumaFbo();
+    bool createHistFbo();
     GLuint compileShader(GLenum type, const char* source);
     void renderQuad(float shiftX, float shiftY, bool rotate, bool isFront);
 
@@ -80,6 +84,14 @@ private:
     GLuint mLumaProgram = 0;
     GLint mLumaUniformTexture = -1;
     static const int LUMA_SIZE = 16; // 16x16 downscale for average
+
+    // Histogram FBO (64x64 downscale)
+    GLuint mHistFbo = 0;
+    GLuint mHistTexture = 0;
+    GLuint mHistPbo[2] = {0, 0};
+    int mHistPboIndex = 0;
+    bool mHistPboReady = false;
+    static const int HIST_SIZE = 64;
 
     int mWidth = 1920;
     int mHeight = 1080;
