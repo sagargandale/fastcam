@@ -142,14 +142,26 @@ private:
     std::condition_variable mFrameCondVar;
     bool mFrameAvailable = false;
 
-    // Gyroscope EIS fields
-    ASensorManager* mSensorManager = nullptr;
-    const ASensor* mGyroSensor = nullptr;
-    ASensorEventQueue* mSensorEventQueue = nullptr;
-    ALooper* mLooper = nullptr;
-    int64_t mLastGyroTimestamp = 0;
-    float mGyroX = 0.0f;
-    float mGyroY = 0.0f;
+    // Gyroscope sensor handle
+    ASensorManager*   mSensorManager     = nullptr;
+    const ASensor*    mGyroSensor        = nullptr;
+    ASensorEventQueue* mSensorEventQueue  = nullptr;
+    ALooper*          mLooper            = nullptr;
+    int64_t           mLastGyroTimestamp = 0; // ns; 0 = no sample received yet
+
+    // EIS angular position state — correct integration approach
+    // mEisAngleX/Y  : accumulated angle (rad) from integrating gyro rate × dt
+    // mEisSmoothedX/Y : low-freq (pan) component; subtracted to isolate shake
+    float mEisAngleX    = 0.0f;
+    float mEisAngleY    = 0.0f;
+    float mEisSmoothedX = 0.0f;
+    float mEisSmoothedY = 0.0f;
+
+    // Camera field-of-view (radians) computed from focal length + physical sensor size.
+    // Used to convert angular shake (rad) → normalised UV shift.
+    // Defaults are safe fallbacks for a ~4mm / 1/1.7" sensor.
+    float mEisFovX = 1.22f; // ~70° horizontal
+    float mEisFovY = 0.88f; // ~50° vertical
 
     // Exposure calculations
     std::mutex mCameraMutex;

@@ -44,6 +44,10 @@ public:
     // Enable/disable real-time computational HDR tone-mapping
     void setHdrEnabled(bool enabled);
 
+    // Set EIS crop scale: 0.85 when EIS is active (15% headroom), 1.0 when OIS/disabled.
+    // Call before each frame or when stabilization mode changes.
+    void setEisCropScale(float scale);
+
 private:
     bool createShaderProgram();
     bool createLumaFbo();
@@ -60,12 +64,13 @@ private:
     // GL objects
     GLuint mCameraTextureId = 0;
     GLuint mShaderProgram = 0;
-    GLint mUniformTexture = -1;
-    GLint mUniformShiftX = -1;
-    GLint mUniformShiftY = -1;
+    GLint mUniformTexture    = -1;
+    GLint mUniformShiftX     = -1;
+    GLint mUniformShiftY     = -1;
     GLint mUniformRotate     = -1;
     GLint mUniformIsFront    = -1;
     GLint mUniformHdrEnabled = -1;
+    GLint mUniformCropScale  = -1; // EIS crop scale uniform
     GLuint mQuadVao = 0;
     GLuint mQuadVbo = 0;
 
@@ -82,6 +87,7 @@ private:
     int mPreviewHeight = 0;
     int64_t mRecordingStartTimestampNs = -1;
     bool mHdrEnabled = false;
+    float mEisCropScale = 0.85f; // 0.85 for EIS (15% headroom), 1.0 for OIS or disabled
 
     // PBO double-buffer for asynchronous luminance readback.
     // Eliminates GPU pipeline stall: issue DMA on frame N, read result on frame N+1.

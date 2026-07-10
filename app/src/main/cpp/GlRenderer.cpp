@@ -1,5 +1,6 @@
 #include "GlRenderer.h"
 #include <android/log.h>
+#include <algorithm>
 #include <cstring>
 #include <cmath>
 
@@ -19,13 +20,14 @@ uniform float uShiftX;
 uniform float uShiftY;
 uniform float uRotate;
 uniform float uIsFront;
+uniform float uCropScale;  // 0.85 for EIS (15% headroom), 1.0 for OIS/disabled
 out vec2 vTexCoord;
 void main() {
     gl_Position = vec4(aPosition, 0.0, 1.0);
-    // Apply EIS offset via texture coordinate shift (crops edges for stabilization margin)
-    float cropScale = 0.9; // 10% crop for EIS headroom
-    vec2 centered = (aTexCoord - 0.5) * cropScale;
-    vec2 shifted = centered + 0.5 + vec2(uShiftX, uShiftY);
+    // Scale UV around centre to create stabilisation headroom without black borders.
+    // EIS shifts are applied as UV offsets within this cropped window.
+    vec2 centered = (aTexCoord - 0.5) * uCropScale;
+    vec2 shifted  = centered + 0.5 + vec2(uShiftX, uShiftY);
     if (uRotate > 0.5) {
         if (uIsFront > 0.5) {
             // Front Camera Portrait Preview: mirror horizontally (flip y-axis in rotated projection)
@@ -44,6 +46,7 @@ void main() {
         }
     }
 })";
+
 
 static const char* FRAGMENT_SHADER = R"(#version 300 es
 #extension GL_OES_EGL_image_external_essl3 : require
@@ -388,12 +391,13 @@ void GlRenderer::renderQuad(float shiftX, float shiftY, bool rotate, bool isFron
 
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, mCameraTextureId);
-    glUniform1i(mUniformTexture, 0);
+    glUniform1i(mUniformTexture,    0);
     glUniform1f(mUniformShiftX,     shiftX);
     glUniform1f(mUniformShiftY,     shiftY);
-    glUniform1f(mUniformRotate,     rotate ? 1.0f : 0.0f);
-    glUniform1f(mUniformIsFront,    isFront ? 1.0f : 0.0f);
+    glUniform1f(mUniformRotate,     rotate   ? 1.0f : 0.0f);
+    glUniform1f(mUniformIsFront,    isFront  ? 1.0f : 0.0f);
     glUniform1f(mUniformHdrEnabled, mHdrEnabled ? 1.0f : 0.0f);
+    glUniform1f(mUniformCropScale,  mEisCropScale);
 
     glBindVertexArray(mQuadVao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -457,6 +461,11 @@ void GlRenderer::setHdrEnabled(bool enabled) {
     mHdrEnabled = enabled;
 }
 
+void GlRenderer::setEisCropScale(float scale) {
+    // Clamp: 1.0 = no crop (OIS/disabled), 0.85 = 15% headroom (EIS active)
+    mEisCropScale = std::max(0.80f, std::min(scale, 1.0f));
+}
+
 // ────────────────────────────────────────────────────────────────
 // Shader Compilation
 // ────────────────────────────────────────────────────────────────
@@ -491,6 +500,7 @@ bool GlRenderer::createShaderProgram() {
     mUniformRotate     = glGetUniformLocation(mShaderProgram, "uRotate");
     mUniformIsFront    = glGetUniformLocation(mShaderProgram, "uIsFront");
     mUniformHdrEnabled = glGetUniformLocation(mShaderProgram, "uHdrEnabled");
+    mUniformCropScale  = glGetUniformLocation(mShaderProgram, "uCropScale");
 
     LOGI("Camera shader program compiled and linked.");
     return true;

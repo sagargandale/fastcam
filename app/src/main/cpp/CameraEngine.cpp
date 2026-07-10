@@ -190,6 +190,23 @@ bool CameraEngine::findRearCamera() {
                 LOGI("Sensor active array: left=%d top=%d w=%d h=%d",
                      mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight);
             }
+
+            // Compute EIS field-of-view from physical sensor size + focal length.
+            // fov = 2 * atan(sensor_dimension / (2 * focal_length_mm))
+            ACameraMetadata_const_entry physEntry, focalEntry;
+            if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_PHYSICAL_SIZE, &physEntry) == ACAMERA_OK
+                    && physEntry.count == 2
+                    && ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &focalEntry) == ACAMERA_OK
+                    && focalEntry.count >= 1) {
+                float sensorW_mm  = physEntry.data.f[0];
+                float sensorH_mm  = physEntry.data.f[1];
+                float focalLen_mm = focalEntry.data.f[0];
+                mEisFovX = 2.0f * std::atan(sensorW_mm / (2.0f * focalLen_mm));
+                mEisFovY = 2.0f * std::atan(sensorH_mm / (2.0f * focalLen_mm));
+                LOGI("EIS FOV calibrated: %.1f\u00b0 x %.1f\u00b0 (sensor %.2fx%.2fmm, f=%.2fmm)",
+                     mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI,
+                     sensorW_mm, sensorH_mm, focalLen_mm);
+            }
         }
 
         ACameraMetadata_free(chars);
@@ -225,7 +242,7 @@ void CameraEngine::setLens(const std::string& lensId) {
             break;
         }
     }
-    // Refresh cached sensor array for the newly selected lens
+    // Refresh cached sensor array and EIS FOV for the newly selected lens
     ACameraMetadata* chars = nullptr;
     if (ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars) == ACAMERA_OK && chars) {
         ACameraMetadata_const_entry arrayEntry;
@@ -236,6 +253,20 @@ void CameraEngine::setLens(const std::string& lensId) {
             mSensorArrayWidth  = arrayEntry.data.i32[2] - arrayEntry.data.i32[0];
             mSensorArrayHeight = arrayEntry.data.i32[3] - arrayEntry.data.i32[1];
         }
+        ACameraMetadata_const_entry physEntry, focalEntry;
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_PHYSICAL_SIZE, &physEntry) == ACAMERA_OK
+                && physEntry.count == 2
+                && ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &focalEntry) == ACAMERA_OK
+                && focalEntry.count >= 1) {
+            mEisFovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
+            mEisFovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
+            LOGI("EIS FOV refreshed for lens %s: %.1f\u00b0 x %.1f\u00b0",
+                 lensId.c_str(), mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI);
+        }
+        // Reset EIS angle state on lens switch
+        mEisAngleX = mEisAngleY = 0.0f;
+        mEisSmoothedX = mEisSmoothedY = 0.0f;
+        mLastGyroTimestamp = 0;
         ACameraMetadata_free(chars);
     }
 
@@ -534,13 +565,43 @@ void CameraEngine::stopRecording() {
 void CameraEngine::setStabilization(bool enabled) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
     mUseStabilization = enabled;
-    LOGI("Custom EIS stabilization enabled: %d", enabled);
+    if (enabled && mUseOis) {
+        // EIS and OIS are mutually exclusive — disable hardware OIS when EIS is requested.
+        // Software EIS does its own stabilisation via the gyro; hardware OIS would fight it.
+        mUseOis = false;
+        LOGI("EIS enabled — hardware OIS disabled (mutually exclusive).");
+    }
+    // Reset accumulated EIS angle so there is no jump when re-enabling
+    mEisAngleX = mEisAngleY = 0.0f;
+    mEisSmoothedX = mEisSmoothedY = 0.0f;
+    mLastGyroTimestamp = 0;
+    // Crop: 15% headroom (scale=0.85) for EIS, full sensor (scale=1.0) when off
+    if (mGlRenderer) {
+        mGlRenderer->setEisCropScale(mUseStabilization ? 0.85f : 1.0f);
+    }
+    LOGI("Custom EIS stabilization: %s", enabled ? "ENABLED" : "DISABLED");
+    if (mCaptureSession && mCaptureRequest) {
+        configureCaptureRequest();
+        updateRepeatingRequest();
+    }
 }
 
 void CameraEngine::setOis(bool enabled) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
     mUseOis = enabled;
-    LOGI("OIS stabilization enabled: %d", enabled);
+    if (enabled && mUseStabilization) {
+        // OIS and EIS are mutually exclusive — disable EIS when hardware OIS is requested.
+        mUseStabilization = false;
+        mEisAngleX = mEisAngleY = 0.0f;
+        mEisSmoothedX = mEisSmoothedY = 0.0f;
+        mLastGyroTimestamp = 0;
+        LOGI("OIS enabled — custom EIS disabled (mutually exclusive).");
+    }
+    // OIS uses the full sensor readout — no artificial crop needed.
+    if (mGlRenderer) {
+        mGlRenderer->setEisCropScale(mUseStabilization ? 0.85f : 1.0f);
+    }
+    LOGI("Hardware OIS: %s", enabled ? "ENABLED" : "DISABLED");
     if (mCaptureSession && mCaptureRequest) {
         configureCaptureRequest();
         updateRepeatingRequest();
@@ -638,20 +699,22 @@ void CameraEngine::initGyroscope() {
 
     mGyroSensor = ASensorManager_getDefaultSensor(mSensorManager, ASENSOR_TYPE_GYROSCOPE);
     if (!mGyroSensor) {
-        LOGW("No hardware gyroscope detected. Custom EIS stabilization disabled.");
+        LOGW("No hardware gyroscope detected. EIS stabilization disabled.");
         return;
     }
 
     mLooper = ALooper_prepare(0);
     mSensorEventQueue = ASensorManager_createEventQueue(mSensorManager, mLooper, 0, nullptr, nullptr);
     ASensorEventQueue_enableSensor(mSensorEventQueue, mGyroSensor);
-    
-    // Sample gyroscope at camera frame rate to avoid wasted samples between renders
-    ASensorEventQueue_setEventRate(mSensorEventQueue, mGyroSensor, 1000000 / std::max(24, mTargetFps));
-    mLastGyroTimestamp = 0;
-    mGyroX = 0.0f;
-    mGyroY = 0.0f;
-    LOGI("EIS Gyroscope initialized.");
+
+    // 200Hz (5ms) — fast enough to capture hand-shake frequencies (1–10Hz) with good temporal
+    // resolution for accurate Euler integration. The render loop drains ALL queued events.
+    ASensorEventQueue_setEventRate(mSensorEventQueue, mGyroSensor, 5000);
+
+    mLastGyroTimestamp = 0; // 0 = no sample yet; first event will be skipped to seed the timestamp
+    mEisAngleX = mEisAngleY = 0.0f;
+    mEisSmoothedX = mEisSmoothedY = 0.0f;
+    LOGI("EIS Gyroscope initialised at 200 Hz.");
 }
 
 void CameraEngine::releaseGyroscope() {
@@ -680,28 +743,63 @@ void CameraEngine::cameraLoop() {
         int frameIntervalUs = 1000000 / std::max(1, (int)mTargetFps);
         nextFrameTime += std::chrono::microseconds(frameIntervalUs);
 
-        // 1. Process Gyroscope EIS offset integration
+        // 1. EIS — integrate all queued gyroscope events and compute UV stabilisation shift
+        float shiftX = 0.0f;
+        float shiftY = 0.0f;
+
         if (mUseStabilization && mSensorEventQueue) {
             ASensorEvent event;
+            // Drain ALL events queued since the last frame (gyro runs at 200Hz, camera at 60fps)
             while (ASensorEventQueue_getEvents(mSensorEventQueue, &event, 1) > 0) {
-                if (event.type == ASENSOR_TYPE_GYROSCOPE) {
-                    float dt = (event.timestamp - mLastGyroTimestamp) * 1e-9f;
-                    if (dt > 0.0f && dt < 0.1f) {
-                        // Apply spring factor to drift-correct integrated angular velocities
-                        mGyroX = mGyroX * 0.95f + event.data[1] * dt;
-                        mGyroY = mGyroY * 0.95f + event.data[0] * dt;
-                    }
-                    mLastGyroTimestamp = event.timestamp;
-                }
-            }
-        } else {
-            mGyroX = 0.0f;
-            mGyroY = 0.0f;
-        }
+                if (event.type != ASENSOR_TYPE_GYROSCOPE) continue;
 
-        // Limit EIS displacement shift to prevent black margins (bound within 10% crop)
-        float shiftX = std::max(-0.05f, std::min(mGyroX * 0.15f, 0.05f));
-        float shiftY = std::max(-0.05f, std::min(mGyroY * 0.15f, 0.05f));
+                if (mLastGyroTimestamp == 0) {
+                    // First sample — seed the timestamp but do not integrate (dt unknown)
+                    mLastGyroTimestamp = event.timestamp;
+                    continue;
+                }
+
+                float dt = (event.timestamp - mLastGyroTimestamp) * 1e-9f;
+                mLastGyroTimestamp = event.timestamp;
+
+                // Reject stale, duplicate, or out-of-order samples
+                if (dt <= 0.0f || dt > 0.05f) continue;
+
+                // Euler integration: angular velocity (rad/s) × dt → angular displacement (rad)
+                // Sensor axes (Android body frame):
+                //   data[0] = rotation around X (pitch: tilt up/down) → shifts image vertically
+                //   data[1] = rotation around Y (roll: tilt left/right) → shifts image horizontally
+                //   data[2] = rotation around Z (yaw: spin) → not useful for 2-axis EIS
+                mEisAngleX += event.data[1] * dt;  // Y-axis gyro → horizontal UV shift
+                mEisAngleY += event.data[0] * dt;  // X-axis gyro → vertical UV shift
+            }
+
+            // High-pass filter: separate intentional panning (low-freq) from camera shake (high-freq)
+            // Smoothed tracks the slow trend; the difference is the shake we must counteract.
+            // Time constant tau = 0.5 s: movements slower than 0.5 s are treated as intentional pan.
+            const float tau   = 0.5f;
+            const float dt_fr = 1.0f / std::max(24, (int)mTargetFps);
+            const float alpha = std::exp(-dt_fr / tau); // ~0.967 at 60fps
+
+            mEisSmoothedX = alpha * mEisSmoothedX + (1.0f - alpha) * mEisAngleX;
+            mEisSmoothedY = alpha * mEisSmoothedY + (1.0f - alpha) * mEisAngleY;
+
+            // Shake component = total angle minus the slow pan trend
+            float shakeX = mEisAngleX - mEisSmoothedX;
+            float shakeY = mEisAngleY - mEisSmoothedY;
+
+            // Convert angular shake (rad) → normalised UV shift using calibrated FOV.
+            // shiftUV = shakeAngle / FOV.  FOV > 0 guaranteed by initialiser defaults.
+            float rawX = shakeX / mEisFovX;
+            float rawY = shakeY / mEisFovY;
+
+            // Clamp to \u00b17.5% UV headroom (crop scale 0.85 → 15% total headroom → \u00b17.5%)
+            const float kMaxShift = 0.075f;
+            shiftX = std::max(-kMaxShift, std::min(rawX, kMaxShift));
+            shiftY = std::max(-kMaxShift, std::min(rawY, kMaxShift));
+        }
+        // When EIS is OFF (or OIS is used), shiftX/Y remain 0 and the shader uses full sensor readout
+
 
         // Update filtered average luminance to reject high-frequency noise
         if (mLastLuma > 0.0f) {
