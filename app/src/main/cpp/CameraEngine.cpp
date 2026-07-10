@@ -412,6 +412,10 @@ bool CameraEngine::configureCaptureRequest() {
     int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
 
+    LOGI("Zoom applied: ratio=%.2f, sensorArray=[%d, %d, %d, %d], cropRegion=[%d, %d, %d, %d]",
+         mZoomRatio, mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight,
+         cropL, cropT, cropL + cropW, cropT + cropH);
+
     return true;
 }
 

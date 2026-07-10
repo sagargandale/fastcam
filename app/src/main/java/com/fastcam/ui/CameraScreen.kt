@@ -156,6 +156,9 @@ fun CameraScreen(
     LaunchedEffect(hdrEnabled) {
         if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetHdrEnabled(hdrEnabled) }
     }
+    LaunchedEffect(zoomRatio) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetZoom(zoomRatio) }
+    }
 
     // Timer coroutine for active video recording duration
     LaunchedEffect(isRecording) {
@@ -311,7 +314,6 @@ fun CameraScreen(
                         val newZoom = (zoomRatio * zoom).coerceIn(1.0f, 8.0f)
                         if (newZoom != zoomRatio) {
                             zoomRatio = newZoom
-                            NativeBridge.nativeSetZoom(newZoom)
                         }
                     }
                 }
