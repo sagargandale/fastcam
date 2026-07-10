@@ -25,9 +25,14 @@ out vec2 vTexCoord;
 void main() {
     gl_Position = vec4(aPosition, 0.0, 1.0);
     // Scale UV around centre to create stabilisation headroom without black borders.
-    // EIS shifts are applied as UV offsets within this cropped window.
     vec2 centered = (aTexCoord - 0.5) * uCropScale;
-    vec2 shifted  = centered + 0.5 + vec2(uShiftX, uShiftY);
+    
+    // In portrait mode, the screen coordinates are rotated 90 degrees relative
+    // to the sensor coordinates. To shift horizontally/vertically on the screen,
+    // we must swap the shift axes mapping to the sensor.
+    vec2 shift = (uRotate > 0.5) ? vec2(uShiftY, uShiftX) : vec2(uShiftX, uShiftY);
+    vec2 shifted  = centered + 0.5 + shift;
+
     if (uRotate > 0.5) {
         if (uIsFront > 0.5) {
             // Front Camera Portrait Preview: mirror horizontally (flip y-axis in rotated projection)

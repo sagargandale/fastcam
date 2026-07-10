@@ -147,20 +147,29 @@ private:
     std::condition_variable mFrameCondVar;
     bool mFrameAvailable = false;
 
-    // Gyroscope sensor handle
-    ASensorManager*   mSensorManager     = nullptr;
-    const ASensor*    mGyroSensor        = nullptr;
+    // IMU Sensor handles — gyroscope (200Hz) + accelerometer (50Hz)
+    ASensorManager*    mSensorManager     = nullptr;
+    const ASensor*     mGyroSensor        = nullptr;
+    const ASensor*     mAccelSensor       = nullptr;
     ASensorEventQueue* mSensorEventQueue  = nullptr;
-    ALooper*          mLooper            = nullptr;
-    int64_t           mLastGyroTimestamp = 0; // ns; 0 = no sample received yet
+    ALooper*           mLooper            = nullptr;
+    int64_t            mLastGyroTimestamp = 0; // ns; 0 = no sample received yet
+    int64_t            mLastAccelTimestamp= 0;
 
-    // EIS angular position state — correct integration approach
-    // mEisAngleX/Y  : accumulated angle (rad) from integrating gyro rate × dt
-    // mEisSmoothedX/Y : low-freq (pan) component; subtracted to isolate shake
-    float mEisAngleX    = 0.0f;
-    float mEisAngleY    = 0.0f;
-    float mEisSmoothedX = 0.0f;
-    float mEisSmoothedY = 0.0f;
+    // ---- Quaternion-based EIS state (inspired by iOS CoreMotion) ----
+    // mOrientation: current fused orientation quaternion [w, x, y, z]
+    // Integrated from gyroscope at 200Hz, corrected by accelerometer at 50Hz.
+    float mOrientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // identity
+
+    // mGravity: latest gravity estimate in device frame from accelerometer low-pass
+    float mGravity[3] = {0.0f, 0.0f, -9.81f};
+
+    // Ring buffer of recent orientation quaternions — used to compute a smoothed
+    // "intended camera path" via spherical averaging. Shake = deviation from smooth path.
+    static const int kEisRingSize = 16;
+    float mOrientRing[kEisRingSize][4]; // circular buffer of [w,x,y,z] quaternions
+    int   mOrientRingHead = 0;
+    bool  mOrientRingFull = false;
 
     // Camera field-of-view (radians) computed from focal length + physical sensor size.
     // Used to convert angular shake (rad) → normalised UV shift.
