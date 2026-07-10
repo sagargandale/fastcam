@@ -78,11 +78,11 @@ fun CameraAppContent() {
     var showSettings by remember { mutableStateOf(false) }
     
     // Live parameters managed by Activity context
-    var resolutionWidth by remember { mutableIntStateOf(1920) }
-    var resolutionHeight by remember { mutableIntStateOf(1080) }
-    var stabilizationEnabled by remember { mutableStateOf(true) }
+    var resolutionWidth by remember { mutableIntStateOf(3840) }
+    var resolutionHeight by remember { mutableIntStateOf(2160) }
+    var stabilizationEnabled by remember { mutableStateOf(false) }
     var oisEnabled by remember { mutableStateOf(false) }
-    var aeMode by remember { mutableIntStateOf(0) }
+    var aeMode by remember { mutableIntStateOf(1) }
     var antiFlickerHz by remember { mutableIntStateOf(0) } // 0 = off, 50 = 50Hz, 60 = 60Hz
     var targetFps by remember { mutableIntStateOf(60) }
     var noiseReductionMode by remember { mutableIntStateOf(1) } // 1 = Fast, 0 = Off, 2 = High Quality
