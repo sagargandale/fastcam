@@ -922,6 +922,10 @@ void CameraEngine::cameraLoop() {
             // ----------------------------------------------------------------
             // Stage 1: Drain IMU events, integrate gyro via quaternion, fuse accel
             // ----------------------------------------------------------------
+            // Poll the looper with 0ms timeout (non-blocking) to ensure that the
+            // looper queries sensor file descriptors and populates the event queue.
+            ALooper_pollOnce(0, nullptr, nullptr, nullptr);
+
             ASensorEvent event;
             while (ASensorEventQueue_getEvents(mSensorEventQueue, &event, 1) > 0) {
 
