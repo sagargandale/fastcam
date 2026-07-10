@@ -130,6 +130,9 @@ private:
     int32_t mExposureCompensation = 0;
     uint8_t mNoiseReductionMode = 1; // Fast
     float mZoomRatio = 1.0f;
+    bool mHasZoomRatio = false;
+    float mMinZoomRatio = 1.0f;
+    float mMaxZoomRatio = 8.0f;
     bool mAeLocked = false; // AE/AF lock: freezes auto exposure and autofocus in auto mode
     int  mVideoRotation = 0; // Rotation hint in degrees for the MP4 container (0, 90, 180, 270)
     bool mHdrEnabled = false;

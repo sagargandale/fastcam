@@ -114,6 +114,45 @@ bool CameraEngine::initCamera(JNIEnv* env, ANativeWindow* previewWindow, int wid
         return false;
     }
 
+    // Always query capabilities and cache sensor array / FOV / zoom range for the selected mCameraId
+    ACameraMetadata* chars = nullptr;
+    if (ACameraManager_getCameraCharacteristics(mCameraManager, mCameraId.c_str(), &chars) == ACAMERA_OK && chars) {
+        ACameraMetadata_const_entry arrayEntry;
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_ACTIVE_ARRAY_SIZE, &arrayEntry) == ACAMERA_OK
+                && arrayEntry.count == 4) {
+            mSensorArrayLeft   = arrayEntry.data.i32[0];
+            mSensorArrayTop    = arrayEntry.data.i32[1];
+            mSensorArrayWidth  = arrayEntry.data.i32[2] - arrayEntry.data.i32[0];
+            mSensorArrayHeight = arrayEntry.data.i32[3] - arrayEntry.data.i32[1];
+            LOGI("initCamera active array size loaded: left=%d top=%d w=%d h=%d",
+                 mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight);
+        }
+        ACameraMetadata_const_entry physEntry, focalEntry;
+        if (ACameraMetadata_getConstEntry(chars, ACAMERA_SENSOR_INFO_PHYSICAL_SIZE, &physEntry) == ACAMERA_OK
+                && physEntry.count == 2
+                && ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &focalEntry) == ACAMERA_OK
+                && focalEntry.count >= 1) {
+            mEisFovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
+            mEisFovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
+            LOGI("initCamera EIS FOV loaded: %.1f\u00b0 x %.1f\u00b0",
+                 mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI);
+        }
+        // Query Zoom Ratio range (API 30+)
+        ACameraMetadata_const_entry zoomRatioEntry;
+        if (ACameraMetadata_getConstEntry(chars, 0x01002e, &zoomRatioEntry) == ACAMERA_OK && zoomRatioEntry.count == 2) {
+            mMinZoomRatio = zoomRatioEntry.data.f[0];
+            mMaxZoomRatio = zoomRatioEntry.data.f[1];
+            mHasZoomRatio = (mMaxZoomRatio > mMinZoomRatio);
+            LOGI("initCamera ZoomRatio support: range=[%.2f, %.2f]", mMinZoomRatio, mMaxZoomRatio);
+        } else {
+            mHasZoomRatio = false;
+            mMinZoomRatio = 1.0f;
+            mMaxZoomRatio = 8.0f;
+            LOGI("initCamera: ZoomRatio support not found, falling back to crop region zoom.");
+        }
+        ACameraMetadata_free(chars);
+    }
+
     ACameraDevice_StateCallbacks deviceCallbacks{
         .context = this,
         .onDisconnected = onDeviceDisconnected,
@@ -207,6 +246,19 @@ bool CameraEngine::findRearCamera() {
                      mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI,
                      sensorW_mm, sensorH_mm, focalLen_mm);
             }
+            // Query Zoom Ratio range (API 30+)
+            ACameraMetadata_const_entry zoomRatioEntry;
+            if (ACameraMetadata_getConstEntry(chars, 0x01002e, &zoomRatioEntry) == ACAMERA_OK && zoomRatioEntry.count == 2) {
+                mMinZoomRatio = zoomRatioEntry.data.f[0];
+                mMaxZoomRatio = zoomRatioEntry.data.f[1];
+                mHasZoomRatio = (mMaxZoomRatio > mMinZoomRatio);
+                LOGI("findRearCamera ZoomRatio support: range=[%.2f, %.2f]", mMinZoomRatio, mMaxZoomRatio);
+            } else {
+                mHasZoomRatio = false;
+                mMinZoomRatio = 1.0f;
+                mMaxZoomRatio = 8.0f;
+                LOGI("findRearCamera: ZoomRatio support not found, falling back to crop region zoom.");
+            }
         }
 
         ACameraMetadata_free(chars);
@@ -262,6 +314,19 @@ void CameraEngine::setLens(const std::string& lensId) {
             mEisFovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
             LOGI("EIS FOV refreshed for lens %s: %.1f\u00b0 x %.1f\u00b0",
                  lensId.c_str(), mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI);
+        }
+        // Query Zoom Ratio range (API 30+)
+        ACameraMetadata_const_entry zoomRatioEntry;
+        if (ACameraMetadata_getConstEntry(chars, 0x01002e, &zoomRatioEntry) == ACAMERA_OK && zoomRatioEntry.count == 2) {
+            mMinZoomRatio = zoomRatioEntry.data.f[0];
+            mMaxZoomRatio = zoomRatioEntry.data.f[1];
+            mHasZoomRatio = (mMaxZoomRatio > mMinZoomRatio);
+            LOGI("setLens ZoomRatio support: range=[%.2f, %.2f]", mMinZoomRatio, mMaxZoomRatio);
+        } else {
+            mHasZoomRatio = false;
+            mMinZoomRatio = 1.0f;
+            mMaxZoomRatio = 8.0f;
+            LOGI("setLens: ZoomRatio support not found, falling back to crop region zoom.");
         }
         // Reset EIS angle state on lens switch
         mEisAngleX = mEisAngleY = 0.0f;
@@ -404,17 +469,37 @@ bool CameraEngine::configureCaptureRequest() {
         ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_ANTIBANDING_MODE, 1, &antibanding);
     }
 
-    // Apply zoom crop region (otherwise zoom is lost when reconfiguring other capture request parameters)
-    int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
-    int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
-    int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
-    int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
-    int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
-    ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
+    // Apply zoom ratio (API 30+) or fallback to crop region (legacy)
+    if (mHasZoomRatio) {
+        // Set ACAMERA_CONTROL_ZOOM_RATIO (0x01002f)
+        float zoomValue = std::max(mMinZoomRatio, std::min(mZoomRatio, mMaxZoomRatio));
+        ACaptureRequest_setEntry_float(mCaptureRequest, 0x01002f, 1, &zoomValue);
 
-    LOGI("Zoom applied: ratio=%.2f, sensorArray=[%d, %d, %d, %d], cropRegion=[%d, %d, %d, %d]",
-         mZoomRatio, mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight,
-         cropL, cropT, cropL + cropW, cropT + cropH);
+        // Also set crop region to the full active array to prevent double crop
+        int32_t cropRegion[4] = {
+            mSensorArrayLeft,
+            mSensorArrayTop,
+            mSensorArrayLeft + mSensorArrayWidth,
+            mSensorArrayTop + mSensorArrayHeight
+        };
+        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
+
+        LOGI("Zoom applied (via ZoomRatio tag): ratio=%.2f (clamped: %.2f), range=[%.2f, %.2f], array=[%d,%d,%d,%d]",
+             mZoomRatio, zoomValue, mMinZoomRatio, mMaxZoomRatio,
+             mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight);
+    } else {
+        // Fallback to legacy crop region zoom (API < 30)
+        int32_t cropW = (int32_t)(mSensorArrayWidth  / mZoomRatio);
+        int32_t cropH = (int32_t)(mSensorArrayHeight / mZoomRatio);
+        int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
+        int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
+        int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
+        ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
+
+        LOGI("Zoom applied (via CropRegion fallback): ratio=%.2f, sensorArray=[%d, %d, %d, %d], cropRegion=[%d, %d, %d, %d]",
+             mZoomRatio, mSensorArrayLeft, mSensorArrayTop, mSensorArrayWidth, mSensorArrayHeight,
+             cropL, cropT, cropL + cropW, cropT + cropH);
+    }
 
     return true;
 }
