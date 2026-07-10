@@ -37,6 +37,7 @@ public:
     bool initCamera(JNIEnv* env, ANativeWindow* previewWindow, int width, int height, bool useStabilization);
     void startRecording(int fd, int rotationDegrees = 0);
     void stopRecording();
+    bool isRecording() const { return mIsRecording.load(); }
     void setStabilization(bool enabled);
     void setOis(bool enabled);
     bool isStabilizationActive();

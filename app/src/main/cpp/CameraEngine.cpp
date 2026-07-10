@@ -837,15 +837,10 @@ void CameraEngine::cameraLoop() {
                     // Artificial lights flicker at 2x the AC frequency (100Hz for 50Hz mains, 120Hz for 60Hz mains)
                     // Shutter period must be a whole multiple of the light flicker period to avoid banding
                     if (mAntiFlickerHz == 50 || mAntiFlickerHz == 60) {
-                        // Light flicker period in nanoseconds: 1 / (2 * Hz)
                         int64_t flickerPeriodNs = 1000000000LL / (2 * mAntiFlickerHz);
-                        // Snap to nearest whole multiple of flicker period
                         int64_t multiples = (targetShutterNs + flickerPeriodNs / 2) / flickerPeriodNs;
                         if (multiples < 1) multiples = 1;
                         targetShutterNs = multiples * flickerPeriodNs;
-                        LOGI("Anti-flicker snap: %d Hz → shutter %lld ns (%d multiples of %lld ns)",
-                             (int)mAntiFlickerHz, (long long)targetShutterNs,
-                             (int)multiples, (long long)flickerPeriodNs);
                     }
 
                     int32_t targetIso = (int32_t)(targetExpVal / targetShutterNs);
@@ -962,7 +957,8 @@ void CameraEngine::setZoom(float ratio) {
     int32_t cropL = mSensorArrayLeft + (mSensorArrayWidth  - cropW) / 2;
     int32_t cropT = mSensorArrayTop  + (mSensorArrayHeight - cropH) / 2;
 
-    int32_t cropRegion[4] = {cropL, cropT, cropW, cropH};
+    // ACAMERA_SCALER_CROP_REGION expects [left, top, right, bottom] absolute pixel coords
+    int32_t cropRegion[4] = {cropL, cropT, cropL + cropW, cropT + cropH};
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_SCALER_CROP_REGION, 4, cropRegion);
 
     updateRepeatingRequest();
@@ -1007,9 +1003,16 @@ void CameraEngine::setFocusPoint(float x, float y, int viewWidth, int viewHeight
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AF_REGIONS, 5, box);
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AE_REGIONS, 5, box);
 
-    uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_START;
-    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
+    // Fire AF trigger for one repeating cycle, then immediately reset to IDLE.
+    // Leaving AF_TRIGGER_START in the repeating request causes the camera to restart
+    // autofocus on every frame — it never locks. IDLE lets AF run and converge.
+    uint8_t afStart = ACAMERA_CONTROL_AF_TRIGGER_START;
+    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afStart);
+    updateRepeatingRequest();
 
+    // Reset to IDLE immediately — the START frame was already queued above
+    uint8_t afIdle = ACAMERA_CONTROL_AF_TRIGGER_IDLE;
+    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afIdle);
     updateRepeatingRequest();
 }
 

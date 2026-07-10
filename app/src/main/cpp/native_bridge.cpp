@@ -42,12 +42,17 @@ Java_com_fastcam_engine_NativeBridge_nativeInit(JNIEnv* env, jobject thiz, jobje
     return success ? JNI_TRUE : JNI_FALSE;
 }
 
-JNIEXPORT void JNICALL
+JNIEXPORT jboolean JNICALL
 Java_com_fastcam_engine_NativeBridge_nativeStartRecording(JNIEnv* env, jobject thiz, jint fd, jint rotation_degrees) {
     (void)env; (void)thiz;
-    if (gEngine) {
-        gEngine->startRecording(fd, rotation_degrees);
+    if (!gEngine) {
+        LOGE("nativeStartRecording called but engine is null");
+        ::close(fd); // Prevent fd leak if engine is gone
+        return JNI_FALSE;
     }
+    gEngine->startRecording(fd, rotation_degrees);
+    // startRecording sets mIsRecording internally; reflect the actual state back
+    return gEngine->isRecording() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL
@@ -159,30 +164,22 @@ Java_com_fastcam_engine_NativeBridge_nativeSetLens(JNIEnv* env, jobject thiz, js
 JNIEXPORT jobjectArray JNICALL
 Java_com_fastcam_engine_NativeBridge_nativeGetAvailableLenses(JNIEnv* env, jobject thiz) {
     (void)thiz;
+
+    // Safety: if engine is not yet initialised, return empty array.
+    // The UI must call nativeGetAvailableLenses() AFTER nativeInit() completes.
+    // Creating a temporary CameraEngine here would race with a real init on another
+    // thread and can crash via ACameraManager_delete() on the temporary engine.
     if (!gEngine) {
-        // Create a temporary CameraEngine to list lenses if engine hasn't been initialized yet
-        CameraEngine tempEngine(gJavaVM);
-        auto lenses = tempEngine.getAvailableLenses();
-        
         jclass clazz = env->FindClass("com/fastcam/engine/CameraLens");
-        jmethodID constructor = env->GetMethodID(clazz, "<init>", "(Ljava/lang/String;FI)V");
-        
-        jobjectArray array = env->NewObjectArray(lenses.size(), clazz, nullptr);
-        for (size_t i = 0; i < lenses.size(); ++i) {
-            jstring id = env->NewStringUTF(lenses[i].id.c_str());
-            jobject obj = env->NewObject(clazz, constructor, id, lenses[i].focalLength, lenses[i].facing);
-            env->SetObjectArrayElement(array, i, obj);
-            env->DeleteLocalRef(id);
-            env->DeleteLocalRef(obj);
-        }
+        jobjectArray empty = env->NewObjectArray(0, clazz, nullptr);
         env->DeleteLocalRef(clazz);
-        return array;
+        return empty;
     }
 
     auto lenses = gEngine->getAvailableLenses();
     jclass clazz = env->FindClass("com/fastcam/engine/CameraLens");
     jmethodID constructor = env->GetMethodID(clazz, "<init>", "(Ljava/lang/String;FI)V");
-    
+
     jobjectArray array = env->NewObjectArray(lenses.size(), clazz, nullptr);
     for (size_t i = 0; i < lenses.size(); ++i) {
         jstring id = env->NewStringUTF(lenses[i].id.c_str());

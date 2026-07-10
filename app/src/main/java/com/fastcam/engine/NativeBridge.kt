@@ -8,7 +8,7 @@ object NativeBridge {
     }
 
     external fun nativeInit(surface: Surface, width: Int, height: Int, useStabilization: Boolean): Boolean
-    external fun nativeStartRecording(fd: Int, rotationDegrees: Int)
+    external fun nativeStartRecording(fd: Int, rotationDegrees: Int): Boolean
     external fun nativeStopRecording()
     external fun nativeRelease()
     external fun nativeSetMode(isAuto: Boolean)

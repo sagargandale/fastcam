@@ -49,6 +49,9 @@ import java.text.SimpleDateFormat
 import java.util.*
 import kotlinx.coroutines.delay
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+
 @Composable
 fun CameraScreen(
     onOpenSettings: () -> Unit,
@@ -96,29 +99,25 @@ fun CameraScreen(
     val focusRingScale = remember { Animatable(1.5f) }
     val focusRingAlpha = remember { Animatable(0f) }
 
-    // Retrieve lenses
-    LaunchedEffect(Unit) {
-        try {
-            availableLenses = NativeBridge.nativeGetAvailableLenses()
-            // Find default rear active lens index
-            val rearIndex = availableLenses.indexOfFirst { it.facing == 1 }
-            if (rearIndex >= 0) {
-                activeLensIndex = rearIndex
-            }
-        } catch (e: Exception) {
-            Log.e("CameraScreen", "Error getting lenses: ${e.message}")
-        }
+    // Retrieve lenses — called AFTER nativeInit() so gEngine is populated
+    // (calling before init would hit the gEngine==null path and return empty)
+    suspend fun fetchLenses() {
+        val lenses = withContext(Dispatchers.IO) { NativeBridge.nativeGetAvailableLenses() }
+        availableLenses = lenses
+        val rearIndex = lenses.indexOfFirst { it.facing == 1 }
+        if (rearIndex >= 0) activeLensIndex = rearIndex
     }
 
-    // Trigger JNI Re-init and sync all settings states dynamically to the C++ engine
-    LaunchedEffect(
-        surfaceObj, resolutionWidth, resolutionHeight, stabilizationEnabled,
-        oisEnabled, aeMode, antiFlickerHz, targetFps, noiseReductionMode, hdrEnabled
-    ) {
-        val s = surfaceObj
-        if (s != null) {
+    // ──────────────────────────────────────────────────────────────────────────
+    // Re-init ONLY when the surface changes or resolution changes.
+    // Changing other runtime params (fps, ae, flicker…) does NOT need a full
+    // camera teardown — they are applied via their own individual setters below.
+    // ──────────────────────────────────────────────────────────────────────────
+    LaunchedEffect(surfaceObj, resolutionWidth, resolutionHeight) {
+        val s = surfaceObj ?: return@LaunchedEffect
+        withContext(Dispatchers.IO) {
             NativeBridge.nativeInit(s, resolutionWidth, resolutionHeight, stabilizationEnabled)
-            // Apply all current parameters to newly re-created engine
+            // Apply current session state to freshly opened engine
             NativeBridge.nativeSetOis(oisEnabled)
             NativeBridge.nativeSetAeMode(aeMode)
             NativeBridge.nativeSetAntiFlicker(antiFlickerHz)
@@ -127,10 +126,35 @@ fun CameraScreen(
             NativeBridge.nativeSetHdrEnabled(hdrEnabled)
             NativeBridge.nativeSetMode(!isManualMode)
             NativeBridge.nativeSetZoom(zoomRatio)
-            if (aeLocked) {
-                NativeBridge.nativeLockAe(true)
-            }
+            if (aeLocked) NativeBridge.nativeLockAe(true)
         }
+        // Fetch lenses after engine is ready (gEngine != null)
+        fetchLenses()
+    }
+
+    // ──────────────────────────────────────────────────────────────────────────
+    // Runtime parameter changes — applied directly without re-initialising camera
+    // ──────────────────────────────────────────────────────────────────────────
+    LaunchedEffect(stabilizationEnabled) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetStabilization(stabilizationEnabled) }
+    }
+    LaunchedEffect(oisEnabled) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetOis(oisEnabled) }
+    }
+    LaunchedEffect(aeMode) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetAeMode(aeMode) }
+    }
+    LaunchedEffect(antiFlickerHz) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetAntiFlicker(antiFlickerHz) }
+    }
+    LaunchedEffect(targetFps) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetFrameRate(targetFps) }
+    }
+    LaunchedEffect(noiseReductionMode) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetNoiseReduction(noiseReductionMode.toByte()) }
+    }
+    LaunchedEffect(hdrEnabled) {
+        if (surfaceObj != null) withContext(Dispatchers.IO) { NativeBridge.nativeSetHdrEnabled(hdrEnabled) }
     }
 
     // Timer coroutine for active video recording duration
@@ -173,12 +197,17 @@ fun CameraScreen(
         }
     }
 
+    // Recording error display state
+    var recordingErrorMessage by remember { mutableStateOf<String?>(null) }
+
     fun handleStartStopRecording() {
         if (isRecording) {
-            // Stop audio capture FIRST (joins the capture thread) so no pushAudioFrame()
-            // calls race with MediaEncoder teardown inside nativeStopRecording().
-            audioCapture.stop()
-            NativeBridge.nativeStopRecording()
+            // Dispatch stop to IO: audioCapture.stop() joins the audio thread (~20-50ms)
+            // and nativeStopRecording() finalizes the muxer — neither should block the UI thread.
+            coroutineScope.launch(Dispatchers.IO) {
+                audioCapture.stop()
+                NativeBridge.nativeStopRecording()
+            }
             isRecording = false
         } else {
             // Start recording
@@ -190,33 +219,46 @@ fun CameraScreen(
             }
             val resolver = context.contentResolver
             val videoUri = resolver.insert(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, contentValues)
-            if (videoUri != null) {
-                try {
-                    val pfd = resolver.openFileDescriptor(videoUri, "rw")
-                    if (pfd != null) {
-                        // Compute final video rotation
-                        val activeLens = availableLenses.getOrNull(activeLensIndex)
-                        val facing = activeLens?.facing ?: 1 // Default to back camera
-                        val sensorOrientation = if (facing == 0) 270 else 90
-                        val rotationDegrees = if (facing == 0) {
-                            (sensorOrientation + deviceOrientationDegrees) % 360
-                        } else {
-                            (sensorOrientation - deviceOrientationDegrees + 360) % 360
-                        }
-
-                        NativeBridge.nativeStartRecording(pfd.detachFd(), rotationDegrees)
-                        audioCapture.audioSource = audioSource
-                        audioCapture.start()
-                        isRecording = true
-                        lastRecordedUri = videoUri
-                    } else {
-                        Log.e("CameraScreen", "Failed to open FileDescriptor for MediaStore URI")
-                    }
-                } catch (e: Exception) {
-                    Log.e("CameraScreen", "Failed to start recording: ${e.message}")
-                }
-            } else {
+            if (videoUri == null) {
+                recordingErrorMessage = "Failed to create video file in gallery"
                 Log.e("CameraScreen", "Failed to insert video entry into MediaStore")
+                return
+            }
+            try {
+                val pfd = resolver.openFileDescriptor(videoUri, "rw")
+                    ?: throw Exception("Could not open file descriptor for MediaStore URI")
+
+                val rawFd = pfd.detachFd()
+                pfd.close() // Release the PFD Java wrapper — ownership of rawFd is now with native
+
+                // Compute final video rotation
+                val activeLens = availableLenses.getOrNull(activeLensIndex)
+                val facing = activeLens?.facing ?: 1
+                val sensorOrientation = if (facing == 0) 270 else 90
+                val rotationDegrees = if (facing == 0) {
+                    (sensorOrientation + deviceOrientationDegrees) % 360
+                } else {
+                    (sensorOrientation - deviceOrientationDegrees + 360) % 360
+                }
+
+                val started = NativeBridge.nativeStartRecording(rawFd, rotationDegrees)
+                if (!started) {
+                    // Native encoder failed — clean up the orphaned MediaStore entry
+                    resolver.delete(videoUri, null, null)
+                    recordingErrorMessage = "Failed to start encoder. Try a lower resolution."
+                    Log.e("CameraScreen", "nativeStartRecording returned false")
+                    return
+                }
+
+                audioCapture.audioSource = audioSource
+                audioCapture.start()
+                isRecording = true
+                lastRecordedUri = videoUri
+            } catch (e: Exception) {
+                // Clean up orphaned MediaStore entry on any exception
+                resolver.delete(videoUri, null, null)
+                recordingErrorMessage = "Recording failed: ${e.message}"
+                Log.e("CameraScreen", "Failed to start recording", e)
             }
         }
     }
@@ -226,6 +268,23 @@ fun CameraScreen(
             .fillMaxSize()
             .background(Color.Black)
     ) {
+        // Error snackbar — shown when recording fails
+        recordingErrorMessage?.let { msg ->
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .align(Alignment.BottomCenter)
+                    .padding(16.dp)
+            ) {
+                Snackbar(
+                    action = {
+                        TextButton(onClick = { recordingErrorMessage = null }) {
+                            Text("Dismiss", color = MaterialTheme.colorScheme.primary)
+                        }
+                    }
+                ) { Text(msg) }
+            }
+        }
         // Viewfinder surface with gesture handling
         AndroidView(
             factory = { ctx ->
@@ -514,12 +573,16 @@ fun CameraScreen(
                     modifier = Modifier
                         .size(54.dp)
                         .clip(CircleShape)
-                        .background(Color(0x991A1A1A))
-                        .clickable {
+                        .background(if (isRecording) Color(0x552C2C2C) else Color(0x991A1A1A))
+                        .clickable(enabled = !isRecording) {
                             if (availableLenses.isNotEmpty()) {
                                 activeLensIndex = (activeLensIndex + 1) % availableLenses.size
                                 val chosenLens = availableLenses[activeLensIndex]
-                                NativeBridge.nativeSetLens(chosenLens.id)
+                                // Dispatch to IO — setLens() calls stopLoopThread() which joins the
+                                // camera background thread. Blocking the main thread here causes ANR.
+                                coroutineScope.launch(Dispatchers.IO) {
+                                    NativeBridge.nativeSetLens(chosenLens.id)
+                                }
                                 zoomRatio = 1.0f
                             }
                         },
