@@ -125,7 +125,7 @@ private:
     // Settings
     bool mIsAutoMode = true;
     bool mUseStabilization = false;
-    bool mUseOis = false;
+    bool mUseOis = true;
     int mAeMode = 0; // 0 = Custom Cinema, 1 = Hardware Default, 2 = Cinematic Portrait (Face Priority)
     int mAntiFlickerHz = 0; // 0 = off, 50 = 50Hz, 60 = 60Hz
     int mActiveLensFacing = 1; // 0 = front, 1 = back, 2 = external
