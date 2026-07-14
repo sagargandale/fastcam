@@ -33,9 +33,9 @@ void main() {
     float transX = uEisMat[3][0];
     float transY = uEisMat[3][1];
     
-    // In portrait mode, swap shift axes to align physical phone movement with the sensor
-    vec2 shift = (uRotate > 0.5) ? vec2(transY, transX) : vec2(transX, transY);
-    vec2 shifted  = scaled + 0.5 + shift;
+    // Apply translation components directly from the matrix. The rotation/mirroring mapping
+    // below will correctly map them to screen axes in all orientations.
+    vec2 shifted  = scaled + 0.5 + vec2(transX, transY);
 
     if (uRotate > 0.5) {
         if (uIsFront > 0.5) {
