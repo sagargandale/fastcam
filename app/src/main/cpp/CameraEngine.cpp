@@ -132,10 +132,11 @@ bool CameraEngine::initCamera(JNIEnv* env, ANativeWindow* previewWindow, int wid
                 && physEntry.count == 2
                 && ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &focalEntry) == ACAMERA_OK
                 && focalEntry.count >= 1) {
-            mEisFovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
-            mEisFovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
+            std::lock_guard<std::mutex> eisLock(mEisMutex);
+            mEis.fovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
+            mEis.fovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
             LOGI("initCamera EIS FOV loaded: %.1f\u00b0 x %.1f\u00b0",
-                 mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI);
+                 mEis.fovX * 180.0f / M_PI, mEis.fovY * 180.0f / M_PI);
         }
         // Query Zoom Ratio range (API 30+)
         ACameraMetadata_const_entry zoomRatioEntry;
@@ -240,10 +241,11 @@ bool CameraEngine::findRearCamera() {
                 float sensorW_mm  = physEntry.data.f[0];
                 float sensorH_mm  = physEntry.data.f[1];
                 float focalLen_mm = focalEntry.data.f[0];
-                mEisFovX = 2.0f * std::atan(sensorW_mm / (2.0f * focalLen_mm));
-                mEisFovY = 2.0f * std::atan(sensorH_mm / (2.0f * focalLen_mm));
+                std::lock_guard<std::mutex> eisLock(mEisMutex);
+                mEis.fovX = 2.0f * std::atan(sensorW_mm / (2.0f * focalLen_mm));
+                mEis.fovY = 2.0f * std::atan(sensorH_mm / (2.0f * focalLen_mm));
                 LOGI("EIS FOV calibrated: %.1f\u00b0 x %.1f\u00b0 (sensor %.2fx%.2fmm, f=%.2fmm)",
-                     mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI,
+                     mEis.fovX * 180.0f / M_PI, mEis.fovY * 180.0f / M_PI,
                      sensorW_mm, sensorH_mm, focalLen_mm);
             }
             // Query Zoom Ratio range (API 30+)
@@ -310,10 +312,11 @@ void CameraEngine::setLens(const std::string& lensId) {
                 && physEntry.count == 2
                 && ACameraMetadata_getConstEntry(chars, ACAMERA_LENS_INFO_AVAILABLE_FOCAL_LENGTHS, &focalEntry) == ACAMERA_OK
                 && focalEntry.count >= 1) {
-            mEisFovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
-            mEisFovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
+            std::lock_guard<std::mutex> eisLock(mEisMutex);
+            mEis.fovX = 2.0f * std::atan(physEntry.data.f[0] / (2.0f * focalEntry.data.f[0]));
+            mEis.fovY = 2.0f * std::atan(physEntry.data.f[1] / (2.0f * focalEntry.data.f[0]));
             LOGI("EIS FOV refreshed for lens %s: %.1f\u00b0 x %.1f\u00b0",
-                 lensId.c_str(), mEisFovX * 180.0f / M_PI, mEisFovY * 180.0f / M_PI);
+                 lensId.c_str(), mEis.fovX * 180.0f / M_PI, mEis.fovY * 180.0f / M_PI);
         }
         // Query Zoom Ratio range (API 30+)
         ACameraMetadata_const_entry zoomRatioEntry;
@@ -852,43 +855,9 @@ void CameraEngine::sensorLoop() {
         ASensorEventQueue_setEventRate(queue, mAccelSensor, 20000); // 50Hz
     }
 
-    // ── Quaternion helpers ────────────────────────────────────────────────────
-    auto qMul = [](float* out, const float* a, const float* b) {
-        out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
-        out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2];
-        out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1];
-        out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
-    };
-    auto qNorm = [](float* q) {
-        float n = std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
-        if (n < 1e-6f) { q[0]=1.f; q[1]=q[2]=q[3]=0.f; return; }
-        float inv = 1.f/n; q[0]*=inv; q[1]*=inv; q[2]*=inv; q[3]*=inv;
-    };
-    // Correct Shoemake SLERP — no dead variables
-    auto qSlerp = [](float* out, const float* a, const float* b, float t) {
-        float dot = a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3];
-        float b0=b[0], b1=b[1], b2=b[2], b3=b[3];
-        if (dot < 0.f) { dot=-dot; b0=-b0; b1=-b1; b2=-b2; b3=-b3; }
-        if (dot > 0.9995f) {
-            // Nearly parallel — linear interpolation + renormalize
-            out[0]=a[0]+(b0-a[0])*t; out[1]=a[1]+(b1-a[1])*t;
-            out[2]=a[2]+(b2-a[2])*t; out[3]=a[3]+(b3-a[3])*t;
-            float n=std::sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]+out[3]*out[3]);
-            if(n>1e-6f){out[0]/=n;out[1]/=n;out[2]/=n;out[3]/=n;} return;
-        }
-        float theta0 = std::acos(dot);
-        float sinTheta0 = std::sin(theta0);
-        float s0 = std::sin((1.f - t) * theta0) / sinTheta0;
-        float s1 = std::sin(t * theta0) / sinTheta0;
-        out[0]=s0*a[0]+s1*b0; out[1]=s0*a[1]+s1*b1;
-        out[2]=s0*a[2]+s1*b2; out[3]=s0*a[3]+s1*b3;
-    };
-
-    // IIR low-pass state for gyro (one-pole, cutoff ~40Hz at 200Hz sample rate)
-    // coeff = exp(-2π * fc / fs) = exp(-2π * 40/200) ≈ 0.287
-    // alpha_lp = 1 - coeff ≈ 0.713  →  stored as complement
-    const float kGyroLp = 0.30f; // smoothed = prev*0.70 + new*0.30 (≈40Hz cutoff)
-    float gyroLp[3] = {0.f, 0.f, 0.f};
+    // LP filter coefficient for raw gyro (~40Hz cutoff)
+    const float kGyroLp = 0.30f;
+    glm::vec3 gyroLp(0.0f);
 
     while (mSensorRunning) {
         // 5ms poll — tight enough to not miss 200Hz events
@@ -902,85 +871,63 @@ void CameraEngine::sensorLoop() {
 
                 if (mEis.lastGyroTs == 0) {
                     mEis.lastGyroTs = event.timestamp;
-                    // Seed LP filter
-                    gyroLp[0] = event.data[0];
-                    gyroLp[1] = event.data[1];
-                    gyroLp[2] = event.data[2];
+                    gyroLp = glm::vec3(event.data[0], event.data[1], event.data[2]);
                     continue;
                 }
                 float dt = (event.timestamp - mEis.lastGyroTs) * 1e-9f;
                 mEis.lastGyroTs = event.timestamp;
-                if (dt <= 0.f || dt > 0.05f) continue; // reject stale/invalid dt
+                if (dt <= 0.f || dt > 0.05f) continue; // reject invalid dt
 
-                // ── Fix 1: IIR low-pass filter on raw gyro ────────────────
-                // Removes high-frequency MEMS noise / quantization jitter before
-                // it enters the quaternion integrator. Without this, micro-noise
-                // accumulates as a random walk in qCurrent causing visible shake.
-                gyroLp[0] = gyroLp[0]*(1.f-kGyroLp) + event.data[0]*kGyroLp;
-                gyroLp[1] = gyroLp[1]*(1.f-kGyroLp) + event.data[1]*kGyroLp;
-                gyroLp[2] = gyroLp[2]*(1.f-kGyroLp) + event.data[2]*kGyroLp;
-                float wx = gyroLp[0], wy = gyroLp[1], wz = gyroLp[2];
+                // 1. IIR low-pass filter on raw gyro (kills MEMS quantization noise)
+                glm::vec3 rawGyro(event.data[0], event.data[1], event.data[2]);
+                gyroLp = gyroLp * (1.f - kGyroLp) + rawGyro * kGyroLp;
+                mEis.gyroFiltered = gyroLp;
 
-                // ── Quaternion integrate ──────────────────────────────────
-                float omega = std::sqrt(wx*wx + wy*wy + wz*wz);
-                float halfA = omega * dt * 0.5f;
-                float dq[4];
+                // 2. Quaternion integration
+                float omega = glm::length(gyroLp);
+                float halfAngle = omega * dt * 0.5f;
+                glm::quat dq;
                 if (omega > 1e-6f) {
-                    float s = std::sin(halfA) / omega;
-                    dq[0]=std::cos(halfA); dq[1]=wx*s; dq[2]=wy*s; dq[3]=wz*s;
+                    float s = std::sin(halfAngle) / omega;
+                    dq = glm::quat(std::cos(halfAngle), gyroLp.x * s, gyroLp.y * s, gyroLp.z * s);
                 } else {
-                    dq[0]=1.f; dq[1]=wx*dt*0.5f; dq[2]=wy*dt*0.5f; dq[3]=wz*dt*0.5f;
+                    dq = glm::quat(1.0f, gyroLp.x * dt * 0.5f, gyroLp.y * dt * 0.5f, gyroLp.z * dt * 0.5f);
                 }
-                float qNew[4];
-                qMul(qNew, mEis.qCurrent, dq);
-                qNorm(qNew);
-                std::copy(qNew, qNew+4, mEis.qCurrent);
+                mEis.currentQuat = glm::normalize(mEis.currentQuat * dq);
 
-                // ── Fix 2: Correct smoothing alpha ────────────────────────
-                // alpha=0.04 at 200Hz → ~25-frame lag on the smoothed path.
-                // This means shake (< ~8Hz) is smoothed out while pans (> ~0.5Hz
-                // sustained) are followed. Previous alpha=0.25 gave only ~4-frame
-                // lag — barely any smoothing at all.
-                //
-                // Fix 3: Adaptive alpha during fast pans.
-                // If the device is rotating faster than 0.3 rad/s (~17°/s), the
-                // user is intentionally panning. Raise alpha to 0.15 so qSmoothed
-                // follows the pan quickly, keeping the crop window centered and
-                // preventing the stabilizer from fighting deliberate motion.
+                // 3. Trajectory smoothing (alpha=0.04 at 200Hz for ~25-frame lag)
+                // During fast pans (omega > 0.3 rad/s), temporarily raise alpha to 0.15
+                // so the crop window follows the intentional motion without jerking.
                 float alpha = (omega > 0.3f) ? 0.15f : 0.04f;
+                mEis.smoothedQuat = glm::normalize(glm::slerp(mEis.smoothedQuat, mEis.currentQuat, alpha));
 
-                float qSmNew[4];
-                qSlerp(qSmNew, mEis.qSmoothed, mEis.qCurrent, alpha);
-                qNorm(qSmNew);
-                std::copy(qSmNew, qSmNew+4, mEis.qSmoothed);
+                // 4. Update history
+                mEis.history[mEis.historyIdx] = mEis.smoothedQuat;
+                mEis.historyIdx = (mEis.historyIdx + 1) % EisState::HISTORY_SIZE;
+                if (mEis.historyIdx == 0) mEis.historyFull = true;
 
             } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
                 std::lock_guard<std::mutex> lock(mEisMutex);
 
-                // Low-pass filter gravity (alpha=0.1 → very slow, rejects all vibration)
-                const float lpA = 0.9f;
-                mEis.gravity[0] = lpA*mEis.gravity[0] + (1.f-lpA)*event.data[0];
-                mEis.gravity[1] = lpA*mEis.gravity[1] + (1.f-lpA)*event.data[1];
-                mEis.gravity[2] = lpA*mEis.gravity[2] + (1.f-lpA)*event.data[2];
+                // Low-pass filter gravity vector (alpha=0.9 -> very slow tilt correction)
+                glm::vec3 accel(event.data[0], event.data[1], event.data[2]);
+                mEis.gravity = mEis.gravity * 0.90f + accel * 0.10f;
 
-                float gLen = std::sqrt(mEis.gravity[0]*mEis.gravity[0]+
-                                       mEis.gravity[1]*mEis.gravity[1]+
-                                       mEis.gravity[2]*mEis.gravity[2]);
-                if (gLen < 1e-6f) continue;
-                float gx=mEis.gravity[0]/gLen, gy=mEis.gravity[1]/gLen, gz=mEis.gravity[2]/gLen;
+                glm::vec3 g = glm::normalize(mEis.gravity);
+                glm::vec3 worldUp(0.0f, 0.0f, 1.0f);
+                glm::vec3 crossVec = glm::cross(g, worldUp);
+                float crossLen = glm::length(crossVec);
 
-                float crossX=gy, crossY=-gx;
-                float crossLen = std::sqrt(crossX*crossX + crossY*crossY);
                 if (crossLen > 1e-6f) {
-                    float cosA = std::max(-1.f, std::min(1.f, gz));
-                    float halfAng = std::acos(cosA) * 0.5f;
-                    float s = std::sin(halfAng) / crossLen;
-                    float qAccel[4] = {std::cos(halfAng), crossX*s, crossY*s, 0.f};
-                    // Gyro dominates 98% — accel only corrects long-term tilt drift
-                    float qFused[4];
-                    qSlerp(qFused, qAccel, mEis.qCurrent, 0.98f);
-                    qNorm(qFused);
-                    std::copy(qFused, qFused+4, mEis.qCurrent);
+                    float cosAngle = glm::clamp(g.z, -1.0f, 1.0f);
+                    float halfAngle = std::acos(cosAngle) * 0.5f;
+                    glm::quat qAccel = glm::quat(std::cos(halfAngle),
+                                                 crossVec.x * std::sin(halfAngle) / crossLen,
+                                                 crossVec.y * std::sin(halfAngle) / crossLen,
+                                                 0.0f); // Pitch/yaw tilt drift correction
+
+                    // Steer gyro integrated quaternion towards accel-derived tilt vector (alpha=0.02)
+                    mEis.currentQuat = glm::normalize(glm::slerp(qAccel, mEis.currentQuat, 0.98f));
                 }
             }
         }
@@ -992,40 +939,42 @@ void CameraEngine::sensorLoop() {
     LOGI("EIS sensor thread exiting cleanly.");
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// getEisShift() — called every frame to read the stabilization UV correction
-// ─────────────────────────────────────────────────────────────────────────────
-void CameraEngine::getEisShift(float& dx, float& dy) {
-    dx = dy = 0.f;
-    if (!mUseStabilization) return;
-
+glm::mat4 CameraEngine::getEisTransform(float zoomRatio) {
     std::lock_guard<std::mutex> lock(mEisMutex);
 
-    // q_deviation = conj(qSmoothed) * qCurrent
-    // This is the rotation needed to move the current (shaky) frame
-    // onto the smoothed (intended) camera path.
-    float qConj[4] = {mEis.qSmoothed[0], -mEis.qSmoothed[1],
-                      -mEis.qSmoothed[2], -mEis.qSmoothed[3]};
-    float qDev[4];
-    qDev[0] = qConj[0]*mEis.qCurrent[0] - qConj[1]*mEis.qCurrent[1] - qConj[2]*mEis.qCurrent[2] - qConj[3]*mEis.qCurrent[3];
-    qDev[1] = qConj[0]*mEis.qCurrent[1] + qConj[1]*mEis.qCurrent[0] + qConj[2]*mEis.qCurrent[3] - qConj[3]*mEis.qCurrent[2];
-    qDev[2] = qConj[0]*mEis.qCurrent[2] - qConj[1]*mEis.qCurrent[3] + qConj[2]*mEis.qCurrent[0] + qConj[3]*mEis.qCurrent[1];
-    qDev[3] = qConj[0]*mEis.qCurrent[3] + qConj[1]*mEis.qCurrent[2] - qConj[2]*mEis.qCurrent[1] + qConj[3]*mEis.qCurrent[0];
+    if (!mUseStabilization) {
+        return glm::mat4(1.0f); // Identity matrix
+    }
 
-    // Small-angle extraction: pitch=2*qx, yaw=2*qy
-    // Sign convention: positive pitch tilts up → move image down (negative dy)
-    //                  positive yaw turns right → move image left (negative dx)
-    float shakeX = 2.f * qDev[1]; // pitch deviation
-    float shakeY = 2.f * qDev[2]; // yaw deviation
+    // Deviation from smoothed path: rotation to apply to correct frame
+    glm::quat deviation = glm::inverse(mEis.smoothedQuat) * mEis.currentQuat;
 
-    // Convert angular deviation (rad) → normalized UV shift via FOV calibration
-    float rawX = -shakeY / mEisFovX; // yaw  → horizontal shift (negated: counter-rotate)
-    float rawY = -shakeX / mEisFovY; // pitch → vertical shift
+    // Extract pitch (around X) and yaw (around Y) in radians
+    glm::vec3 euler = glm::eulerAngles(deviation);
+    float pitchDeg = glm::degrees(euler.x);
+    float yawDeg = glm::degrees(euler.y);
 
-    // Clamp to ±7.5% — matches the 0.85 crop scale (15% total headroom)
-    const float kMaxShift = 0.075f;
-    dx = std::max(-kMaxShift, std::min(rawX, kMaxShift));
-    dy = std::max(-kMaxShift, std::min(rawY, kMaxShift));
+    // Convert angular deviation to normalized screen offset (in UV space)
+    float maxOffsetX = (1.0f - mEis.cropScale) * 0.5f;
+    float maxOffsetY = (1.0f - mEis.cropScale) * 0.5f;
+
+    float rawX = -yawDeg / glm::degrees(mEis.fovX); // horizontal shift
+    float rawY = -pitchDeg / glm::degrees(mEis.fovY); // vertical shift
+
+    // Zoom compensation: higher zoom = larger relative shift
+    float zoomComp = glm::max(zoomRatio, 1.0f);
+    float offsetX = rawX * zoomComp;
+    float offsetY = rawY * zoomComp;
+
+    // Clamp the final translation to safe margin bounds
+    offsetX = glm::clamp(offsetX, -maxOffsetX, maxOffsetX);
+    offsetY = glm::clamp(offsetY, -maxOffsetY, maxOffsetY);
+
+    // Create 2D affine transformation matrix: translate then scale
+    glm::mat4 trans = glm::translate(glm::mat4(1.0f), glm::vec3(offsetX, offsetY, 0.0f));
+    glm::mat4 scale = glm::scale(glm::mat4(1.0f), glm::vec3(mEis.cropScale, mEis.cropScale, 1.0f));
+
+    return trans * scale;
 }
 
 
@@ -1047,10 +996,8 @@ void CameraEngine::cameraLoop() {
         int frameIntervalUs = 1000000 / std::max(1, (int)mTargetFps);
         nextFrameTime += std::chrono::microseconds(frameIntervalUs);
 
-        // 1. EIS — read stabilization shift from dedicated sensor thread (lock-free snapshot)
-        float shiftX = 0.0f;
-        float shiftY = 0.0f;
-        getEisShift(shiftX, shiftY);
+        // 1. EIS — read stabilization transform from dedicated sensor thread (lock-free snapshot)
+        glm::mat4 eisMat = getEisTransform(mZoomRatio);
 
 
         // Update filtered average luminance to reject high-frequency noise
@@ -1160,7 +1107,7 @@ void CameraEngine::cameraLoop() {
         env->CallVoidMethod(mSurfaceTextureRef, mUpdateTexImageMethod);
         jlong timestampNs = env->CallLongMethod(mSurfaceTextureRef, mGetTimestampMethod);
 
-        mGlRenderer->renderFrame(shiftX, shiftY, snapRecording, timestampNs, snapIsFront);
+        mGlRenderer->renderFrame(eisMat, snapRecording, timestampNs, snapIsFront);
 
         // 6. Read back hardware downsampled luminance for next PID iteration
         mLastLuma = mGlRenderer->readAverageLuma();

@@ -7,6 +7,7 @@
 #include <GLES3/gl3.h>
 #include <GLES2/gl2ext.h>
 #include <android/native_window.h>
+#include <glm/glm.hpp>
 
 /**
  * OpenGL ES 3.1 GPU rendering pipeline.
@@ -35,8 +36,8 @@ public:
     void createEncoderSurface(ANativeWindow* encoderWindow);
     void destroyEncoderSurface();
 
-    // Render a frame with EIS offset and optional encoder output
-    void renderFrame(float eisShiftX, float eisShiftY, bool recording, int64_t timestampNs, bool isFront);
+    // Render a frame with EIS transform matrix and optional encoder output
+    void renderFrame(const glm::mat4& eisMat, bool recording, int64_t timestampNs, bool isFront);
 
     // Read average luminance from last rendered frame (for PID exposure)
     float readAverageLuma();
@@ -56,7 +57,7 @@ private:
     bool createLumaFbo();
     bool createHistFbo();
     GLuint compileShader(GLenum type, const char* source);
-    void renderQuad(float shiftX, float shiftY, bool rotate, bool isFront);
+    void renderQuad(const glm::mat4& eisMat, bool rotate, bool isFront);
 
     // EGL objects
     EGLDisplay mEglDisplay = EGL_NO_DISPLAY;
@@ -69,8 +70,7 @@ private:
     GLuint mCameraTextureId = 0;
     GLuint mShaderProgram = 0;
     GLint mUniformTexture    = -1;
-    GLint mUniformShiftX     = -1;
-    GLint mUniformShiftY     = -1;
+    GLint mUniformEisMat     = -1;
     GLint mUniformRotate     = -1;
     GLint mUniformIsFront    = -1;
     GLint mUniformHdrEnabled = -1;

@@ -19,6 +19,10 @@
 #include <string>
 #include <vector>
 
+#include <glm/glm.hpp>
+#include <glm/gtc/quaternion.hpp>
+#include <glm/gtc/matrix_transform.hpp>
+
 #include "GlRenderer.h"
 #include "MediaEncoder.h"
 #include "PidController.h"
@@ -85,7 +89,7 @@ private:
     void initGyroscope();
     void releaseGyroscope();
     void sensorLoop();                           // Dedicated 200Hz IMU thread body
-    void getEisShift(float& dx, float& dy);      // Read current EIS UV shift (thread-safe)
+    glm::mat4 getEisTransform(float zoomRatio);  // Compute EIS transform matrix (thread-safe)
 
     // Java VM and JNI
     JavaVM* mJavaVM = nullptr;
@@ -163,18 +167,34 @@ private:
 
     // ---- EIS State (protected by mEisMutex) ----
     struct EisState {
-        float qCurrent[4]  = {1.f, 0.f, 0.f, 0.f}; // gyro-integrated orientation [w,x,y,z]
-        float qSmoothed[4] = {1.f, 0.f, 0.f, 0.f}; // exponentially smoothed "intended path"
-        float gravity[3]   = {0.f, 0.f, 9.81f};     // LP-filtered accelerometer (m/s²)
-        int64_t lastGyroTs = 0;                      // ns timestamp of last gyro sample
+        // Orientation
+        glm::quat currentQuat = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);     // raw integrated
+        glm::quat smoothedQuat = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);    // filtered target
+        
+        // History for smoothing
+        static constexpr int HISTORY_SIZE = 32;
+        glm::quat history[HISTORY_SIZE] = { glm::quat(1.0f, 0.0f, 0.0f, 0.0f) };
+        int historyIdx = 0;
+        bool historyFull = false;
+        
+        // Motion metrics
+        glm::vec3 gyroFiltered = glm::vec3(0.0f);
+        glm::vec3 gravity = glm::vec3(0.0f, 0.0f, 9.81f); // LP-filtered accelerometer (m/s²)
+        float motionIntensity = 0.0f;   // for adaptive strength
+        
+        // Crop parameters (normalized)
+        float cropX = 0.0f;
+        float cropY = 0.0f;
+        float cropScale = 0.88f;        // ~12% margin
+        
+        // FOV (radians)
+        float fovX = 1.22f;  // ~70 degrees horizontal
+        float fovY = 0.88f;
+
+        int64_t lastGyroTs = 0; // ns timestamp of last gyro sample
     };
     EisState   mEis;
     std::mutex mEisMutex;
-
-    // Camera field-of-view (radians) — computed from focal length + physical sensor size.
-    // Used to convert angular shake (rad) → normalised UV shift.
-    float mEisFovX = 1.22f; // ~70° horizontal (safe default for ~4mm / 1/1.7" sensor)
-    float mEisFovY = 0.88f; // ~50° vertical
 
     // Exposure calculations
     std::mutex mCameraMutex;

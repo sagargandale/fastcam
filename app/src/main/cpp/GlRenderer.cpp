@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstring>
 #include <cmath>
+#include <glm/gtc/type_ptr.hpp>
 
 #define LOG_TAG "[GlRenderer]"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -16,22 +17,25 @@
 static const char* VERTEX_SHADER = R"(#version 300 es
 layout(location = 0) in vec2 aPosition;
 layout(location = 1) in vec2 aTexCoord;
-uniform float uShiftX;
-uniform float uShiftY;
+uniform mat4 uEisMat;
 uniform float uRotate;
 uniform float uIsFront;
-uniform float uCropScale;  // 0.85 for EIS (15% headroom), 1.0 for OIS/disabled
 out vec2 vTexCoord;
 void main() {
     gl_Position = vec4(aPosition, 0.0, 1.0);
-    // Scale UV around centre to create stabilisation headroom without black borders.
-    vec2 centered = (aTexCoord - 0.5) * uCropScale;
     
-    // In portrait mode, the screen coordinates are rotated 90 degrees relative
-    // to the sensor coordinates. To shift horizontally/vertically on the screen,
-    // we must swap the shift axes mapping to the sensor.
-    vec2 shift = (uRotate > 0.5) ? vec2(uShiftY, uShiftX) : vec2(uShiftX, uShiftY);
-    vec2 shifted  = centered + 0.5 + shift;
+    // Scale UV coordinates centered at 0
+    float scaleX = uEisMat[0][0];
+    float scaleY = uEisMat[1][1];
+    vec2 scaled = (aTexCoord - 0.5) * vec2(scaleX, scaleY);
+    
+    // Translation components from the matrix (col 3)
+    float transX = uEisMat[3][0];
+    float transY = uEisMat[3][1];
+    
+    // In portrait mode, swap shift axes to align physical phone movement with the sensor
+    vec2 shift = (uRotate > 0.5) ? vec2(transY, transX) : vec2(transX, transY);
+    vec2 shifted  = scaled + 0.5 + shift;
 
     if (uRotate > 0.5) {
         if (uIsFront > 0.5) {
@@ -357,11 +361,11 @@ void GlRenderer::destroyEncoderSurface() {
 // Rendering
 // ────────────────────────────────────────────────────────────────
 
-void GlRenderer::renderFrame(float eisShiftX, float eisShiftY, bool recording, int64_t timestampNs, bool isFront) {
+void GlRenderer::renderFrame(const glm::mat4& eisMat, bool recording, int64_t timestampNs, bool isFront) {
     // 1. Render to preview surface
     eglMakeCurrent(mEglDisplay, mPreviewSurface, mPreviewSurface, mEglContext);
     glViewport(0, 0, mPreviewWidth, mPreviewHeight);
-    renderQuad(eisShiftX, eisShiftY, true, isFront); // Rotate preview for portrait view
+    renderQuad(eisMat, true, isFront); // Rotate preview for portrait view
     eglSwapBuffers(mEglDisplay, mPreviewSurface);
 
     // 2. Render to encoder surface if recording
@@ -377,7 +381,7 @@ void GlRenderer::renderFrame(float eisShiftX, float eisShiftY, bool recording, i
         eglPresentationTimeANDROID(mEglDisplay, mEncoderSurface, relativeTimestampNs);
 
         glViewport(0, 0, mWidth, mHeight);
-        renderQuad(eisShiftX, eisShiftY, false, isFront); // No rotation for landscape encoder
+        renderQuad(eisMat, false, isFront); // No rotation for landscape encoder
         eglSwapBuffers(mEglDisplay, mEncoderSurface);
 
         // Restore preview context
@@ -420,7 +424,7 @@ void GlRenderer::renderFrame(float eisShiftX, float eisShiftY, bool recording, i
     glBindFramebuffer(GL_FRAMEBUFFER, 0);
 }
 
-void GlRenderer::renderQuad(float shiftX, float shiftY, bool rotate, bool isFront) {
+void GlRenderer::renderQuad(const glm::mat4& eisMat, bool rotate, bool isFront) {
     glClearColor(0.0f, 0.0f, 0.0f, 1.0f);
     glClear(GL_COLOR_BUFFER_BIT);
 
@@ -429,12 +433,10 @@ void GlRenderer::renderQuad(float shiftX, float shiftY, bool rotate, bool isFron
     glActiveTexture(GL_TEXTURE0);
     glBindTexture(GL_TEXTURE_EXTERNAL_OES, mCameraTextureId);
     glUniform1i(mUniformTexture,    0);
-    glUniform1f(mUniformShiftX,     shiftX);
-    glUniform1f(mUniformShiftY,     shiftY);
+    glUniformMatrix4fv(mUniformEisMat, 1, GL_FALSE, glm::value_ptr(eisMat));
     glUniform1f(mUniformRotate,     rotate   ? 1.0f : 0.0f);
     glUniform1f(mUniformIsFront,    isFront  ? 1.0f : 0.0f);
     glUniform1f(mUniformHdrEnabled, mHdrEnabled ? 1.0f : 0.0f);
-    glUniform1f(mUniformCropScale,  mEisCropScale);
 
     glBindVertexArray(mQuadVao);
     glDrawArrays(GL_TRIANGLES, 0, 6);
@@ -532,12 +534,10 @@ bool GlRenderer::createShaderProgram() {
     }
 
     mUniformTexture    = glGetUniformLocation(mShaderProgram, "uTexture");
-    mUniformShiftX     = glGetUniformLocation(mShaderProgram, "uShiftX");
-    mUniformShiftY     = glGetUniformLocation(mShaderProgram, "uShiftY");
+    mUniformEisMat     = glGetUniformLocation(mShaderProgram, "uEisMat");
     mUniformRotate     = glGetUniformLocation(mShaderProgram, "uRotate");
     mUniformIsFront    = glGetUniformLocation(mShaderProgram, "uIsFront");
     mUniformHdrEnabled = glGetUniformLocation(mShaderProgram, "uHdrEnabled");
-    mUniformCropScale  = glGetUniformLocation(mShaderProgram, "uCropScale");
 
     LOGI("Camera shader program compiled and linked.");
     return true;
