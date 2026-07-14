@@ -434,18 +434,19 @@ bool CameraEngine::configureCaptureRequest() {
     ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_LENS_OPTICAL_STABILIZATION_MODE, 1, &oisMode);
 
     // Focus controls
-    if (mIsAutoMode) {
+    // Both auto-mode and manual mode use CONTINUOUS_VIDEO so the lens always hunts
+    // and converges. Tap-to-focus narrows the metering region rather than switching
+    // to one-shot AF_MODE_AUTO (which would stall after a single scan).
+    if (mAutoFocus) {
         uint8_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO;
         ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+        // Ensure AF trigger is always IDLE in the repeating request
+        uint8_t afIdle = ACAMERA_CONTROL_AF_TRIGGER_IDLE;
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afIdle);
     } else {
-        if (mAutoFocus) {
-            uint8_t afMode = ACAMERA_CONTROL_AF_MODE_AUTO;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
-        } else {
-            uint8_t afMode = ACAMERA_CONTROL_AF_MODE_OFF;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
-            ACaptureRequest_setEntry_float(mCaptureRequest, ACAMERA_LENS_FOCUS_DISTANCE, 1, &mFocusDistance);
-        }
+        uint8_t afMode = ACAMERA_CONTROL_AF_MODE_OFF;
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+        ACaptureRequest_setEntry_float(mCaptureRequest, ACAMERA_LENS_FOCUS_DISTANCE, 1, &mFocusDistance);
     }
 
     // Exposure controls
@@ -728,24 +729,13 @@ void CameraEngine::setAntiFlicker(int hz) {
 void CameraEngine::lockAe(bool locked) {
     std::lock_guard<std::mutex> lock(mCameraMutex);
     mAeLocked = locked;
-    LOGI("AE/AF lock: %s", locked ? "LOCKED" : "UNLOCKED");
+    LOGI("AE lock: %s", locked ? "LOCKED" : "UNLOCKED");
 
     if (mCaptureRequest) {
-        if (locked) {
-            // Hardware AE lock: freeze hardware AE state at current value
-            uint8_t aeLock = ACAMERA_CONTROL_AE_LOCK_ON;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_LOCK, 1, &aeLock);
-            // Trigger AF to lock focus at current position
-            uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_START;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
-        } else {
-            // Hardware AE unlock: resume normal AE
-            uint8_t aeLock = ACAMERA_CONTROL_AE_LOCK_OFF;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_LOCK, 1, &aeLock);
-            // Cancel AF trigger to resume continuous autofocus
-            uint8_t afTrigger = ACAMERA_CONTROL_AF_TRIGGER_CANCEL;
-            ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afTrigger);
-        }
+        // Only apply AE lock/unlock — do NOT touch AF trigger here.
+        // AF is managed independently by setFocusPoint() via burst captures.
+        uint8_t aeLock = locked ? ACAMERA_CONTROL_AE_LOCK_ON : ACAMERA_CONTROL_AE_LOCK_OFF;
+        ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AE_LOCK, 1, &aeLock);
         if (mCaptureSession) {
             updateRepeatingRequest();
         }
@@ -1434,17 +1424,27 @@ void CameraEngine::setFocusPoint(float x, float y, int viewWidth, int viewHeight
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AF_REGIONS, 5, box);
     ACaptureRequest_setEntry_i32(mCaptureRequest, ACAMERA_CONTROL_AE_REGIONS, 5, box);
 
-    // Fire AF trigger for one repeating cycle, then immediately reset to IDLE.
-    // Leaving AF_TRIGGER_START in the repeating request causes the camera to restart
-    // autofocus on every frame — it never locks. IDLE lets AF run and converge.
-    uint8_t afStart = ACAMERA_CONTROL_AF_TRIGGER_START;
-    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afStart);
+    // Update repeating request with new focus/metering region (trigger stays IDLE)
     updateRepeatingRequest();
 
-    // Reset to IDLE immediately — the START frame was already queued above
-    uint8_t afIdle = ACAMERA_CONTROL_AF_TRIGGER_IDLE;
-    ACaptureRequest_setEntry_u8(mCaptureRequest, ACAMERA_CONTROL_AF_TRIGGER, 1, &afIdle);
-    updateRepeatingRequest();
+    // Send AF_TRIGGER_START as a SINGLE BURST CAPTURE — not via the repeating request.
+    // This guarantees the HAL sees exactly one START frame before returning to IDLE.
+    // Using the repeating request for START causes a race: the IDLE overwrite may arrive
+    // before the HAL processes the START, losing the trigger intermittently.
+    ACaptureRequest* triggerReq = nullptr;
+    if (ACameraDevice_createCaptureRequest(mCameraDevice, TEMPLATE_RECORD, &triggerReq) == ACAMERA_OK && triggerReq) {
+        // Copy current AF mode and region settings into the one-shot trigger request
+        uint8_t afMode = ACAMERA_CONTROL_AF_MODE_CONTINUOUS_VIDEO;
+        ACaptureRequest_setEntry_u8(triggerReq, ACAMERA_CONTROL_AF_MODE, 1, &afMode);
+        ACaptureRequest_setEntry_i32(triggerReq, ACAMERA_CONTROL_AF_REGIONS, 5, box);
+        ACaptureRequest_setEntry_i32(triggerReq, ACAMERA_CONTROL_AE_REGIONS, 5, box);
+
+        uint8_t afStart = ACAMERA_CONTROL_AF_TRIGGER_START;
+        ACaptureRequest_setEntry_u8(triggerReq, ACAMERA_CONTROL_AF_TRIGGER, 1, &afStart);
+
+        ACameraCaptureSession_capture(mCaptureSession, nullptr, 1, &triggerReq, nullptr);
+        ACaptureRequest_free(triggerReq);
+    }
 }
 
 void CameraEngine::setExposureCompensation(int32_t value) {
