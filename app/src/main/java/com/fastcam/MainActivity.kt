@@ -81,7 +81,7 @@ fun CameraAppContent() {
     var resolutionWidth by remember { mutableIntStateOf(3840) }
     var resolutionHeight by remember { mutableIntStateOf(2160) }
     var stabilizationEnabled by remember { mutableStateOf(false) }
-    var oisEnabled by remember { mutableStateOf(false) }
+    var oisEnabled by remember { mutableStateOf(true) }
     var aeMode by remember { mutableIntStateOf(1) }
     var antiFlickerHz by remember { mutableIntStateOf(0) } // 0 = off, 50 = 50Hz, 60 = 60Hz
     var targetFps by remember { mutableIntStateOf(60) }
