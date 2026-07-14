@@ -855,8 +855,8 @@ void CameraEngine::sensorLoop() {
         ASensorEventQueue_setEventRate(queue, mAccelSensor, 20000); // 50Hz
     }
 
-    // LP filter coefficient for raw gyro (~40Hz cutoff)
-    const float kGyroLp = 0.30f;
+    // Stronger low-pass filter (tuned for smoothness: 0.78f prev, 0.22f new)
+    const float kGyroLp = 0.22f;
     glm::vec3 gyroLp(0.0f);
 
     while (mSensorRunning) {
@@ -895,10 +895,10 @@ void CameraEngine::sensorLoop() {
                 }
                 mEis.currentQuat = glm::normalize(mEis.currentQuat * dq);
 
-                // 3. Trajectory smoothing (alpha=0.04 at 200Hz for ~25-frame lag)
-                // During fast pans (omega > 0.3 rad/s), temporarily raise alpha to 0.15
-                // so the crop window follows the intentional motion without jerking.
-                float alpha = (omega > 0.3f) ? 0.15f : 0.04f;
+                // 3. Very smooth slerp target trajectory interpolation using mEis.smoothingAlpha
+                // During fast pans (omega > 0.3 rad/s), temporarily raise alpha to 0.28f
+                // to follow intentional pan quickly and prevent crop hits.
+                float alpha = (omega > 0.3f) ? 0.28f : mEis.smoothingAlpha;
                 mEis.smoothedQuat = glm::normalize(glm::slerp(mEis.smoothedQuat, mEis.currentQuat, alpha));
 
                 // 4. Update history
@@ -954,25 +954,22 @@ glm::mat4 CameraEngine::getEisTransform(float zoomRatio) {
     float pitchDeg = glm::degrees(euler.x);
     float yawDeg = glm::degrees(euler.y);
 
-    // Convert angular deviation to normalized screen offset (in UV space)
-    float maxOffsetX = (1.0f - mEis.cropScale) * 0.5f;
-    float maxOffsetY = (1.0f - mEis.cropScale) * 0.5f;
+    // Adaptive strength (less correction when stable to prevent floatiness)
+    float adaptive = 0.9f + 0.6f * glm::length(mEis.gyroFiltered);
+    adaptive = glm::clamp(adaptive, 0.6f, 1.4f);
 
-    float rawX = -yawDeg / glm::degrees(mEis.fovX); // horizontal shift
-    float rawY = -pitchDeg / glm::degrees(mEis.fovY); // vertical shift
+    float strength = 0.013f * adaptive / glm::max(zoomRatio, 1.0f);
 
-    // Zoom compensation: higher zoom = larger relative shift
-    float zoomComp = glm::max(zoomRatio, 1.0f);
-    float offsetX = rawX * zoomComp;
-    float offsetY = rawY * zoomComp;
+    // Negated to counteract physical shake direction
+    float offsetX = glm::clamp(-yawDeg * strength, -mEis.maxCorrection, mEis.maxCorrection);
+    float offsetY = glm::clamp(-pitchDeg * strength, -mEis.maxCorrection, mEis.maxCorrection);
 
-    // Clamp the final translation to safe margin bounds
-    offsetX = glm::clamp(offsetX, -maxOffsetX, maxOffsetX);
-    offsetY = glm::clamp(offsetY, -maxOffsetY, maxOffsetY);
+    // Zoom-adaptive crop margin: crops more at higher zoom to provide more stabilization headroom
+    float finalScale = mEis.cropScale * (1.0f / glm::max(zoomRatio * 0.3f, 1.0f));
 
     // Create 2D affine transformation matrix: translate then scale
     glm::mat4 trans = glm::translate(glm::mat4(1.0f), glm::vec3(offsetX, offsetY, 0.0f));
-    glm::mat4 scale = glm::scale(glm::mat4(1.0f), glm::vec3(mEis.cropScale, mEis.cropScale, 1.0f));
+    glm::mat4 scale = glm::scale(glm::mat4(1.0f), glm::vec3(finalScale, finalScale, 1.0f));
 
     return trans * scale;
 }

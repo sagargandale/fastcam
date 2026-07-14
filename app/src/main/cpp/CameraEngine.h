@@ -185,8 +185,13 @@ private:
         // Crop parameters (normalized)
         float cropX = 0.0f;
         float cropY = 0.0f;
-        float cropScale = 0.88f;        // ~12% margin
+        float cropScale = 0.82f;        // ~18% margin (tuned for smoothness)
         
+        // TUNED FOR SMOOTHNESS
+        float smoothingAlpha = 0.16f;   // Lower = smoother
+        float maxCorrection = 0.14f;    // Max stabilization crop boundary
+        float motionAdaptive = 1.0f;    // Motion intensity scale factor
+
         // FOV (radians)
         float fovX = 1.22f;  // ~70 degrees horizontal
         float fovY = 0.88f;
