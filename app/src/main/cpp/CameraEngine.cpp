@@ -909,6 +909,10 @@ void CameraEngine::sensorLoop() {
                 mEis.historyIdx = (mEis.historyIdx + 1) % EisState::HISTORY_SIZE;
                 if (mEis.historyIdx == 0) mEis.historyFull = true;
 
+                // 5. Push to latency buffer and run 6-state Kalman predictor-corrector
+                pushLatencyBuffer(mEis.currentQuat, event.timestamp);
+                kalmanPredictUpdate(gyroLp, dt);
+
             } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
                 std::lock_guard<std::mutex> lock(mEisMutex);
 
@@ -983,6 +987,168 @@ glm::quat CameraEngine::getInterpolatedOrientation(int64_t frameTimestampNs) {
 
     return mEis.currentQuat;
 }
+void CameraEngine::applyAdaptiveInflation(float omegaMag, float innovationMag) {
+    // Smooth estimate of motion intensity
+    mKalman.motionAvg = mKalman.motionAvg * 0.95f + omegaMag * 0.05f;
+    mKalman.motionInflation = 1.0f + 5.0f * mKalman.motionAvg;
+
+    // Smooth estimate of measurement innovation (error between prediction and accel orientation)
+    mKalman.innovationAvg = mKalman.innovationAvg * 0.95f + innovationMag * 0.05f;
+    mKalman.innovationInflation = 1.0f + 10.0f * glm::clamp(mKalman.innovationAvg, 0.0f, 1.0f);
+}
+
+void CameraEngine::kalmanPredictUpdate(const glm::vec3& gyro, float dt) {
+    // 1. Predict state (angle in radians, bias constant)
+    mKalman.angle += (gyro - mKalman.bias) * dt;
+
+    // 2. Predict covariance analytically: P = F * P * F_T + Q
+    float pPrev[6][6];
+    std::memcpy(pPrev, mKalman.P, sizeof(pPrev));
+
+    // Analytical equation for F * P * F_T where F = [[I, -I*dt], [0, I]]
+    float pNew[6][6];
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < 6; ++j) {
+            if (i < 3 && j < 3) {
+                pNew[i][j] = pPrev[i][j] - dt * (pPrev[i + 3][j] + pPrev[i][j + 3]) + dt * dt * pPrev[i + 3][j + 3];
+            } else if (i < 3 && j >= 3) {
+                pNew[i][j] = pPrev[i][j] - dt * pPrev[i + 3][j];
+            } else if (i >= 3 && j < 3) {
+                pNew[i][j] = pPrev[i][j] - dt * pPrev[i][j + 3];
+            } else {
+                pNew[i][j] = pPrev[i][j];
+            }
+        }
+    }
+
+    // Add process noise covariance Q
+    float qAngle = mKalman.Q_angle * mKalman.motionInflation;
+    float qBias = mKalman.Q_bias;
+    for (int i = 0; i < 3; ++i) {
+        pNew[i][i] += qAngle;
+        pNew[i + 3][i + 3] += qBias;
+    }
+    std::memcpy(mKalman.P, pNew, sizeof(mKalman.P));
+
+    // 3. Prepare measurement z from filtered accelerometer + raw yaw
+    float ax = mEis.gravity.x;
+    float ay = mEis.gravity.y;
+    float az = mEis.gravity.z;
+    float roll = std::atan2(ay, az);
+    float pitch = std::atan2(-ax, std::sqrt(ay * ay + az * az));
+
+    // Yaw comes from raw integrated gyro (pitch = x, yaw = y, roll = z in glm::eulerAngles)
+    glm::vec3 rawEuler = glm::eulerAngles(mEis.currentQuat);
+    float yaw = rawEuler.y;
+
+    glm::vec3 z(roll, pitch, yaw);
+
+    // 4. Update step
+    // Innovation y = z - H * x
+    glm::vec3 y = z - mKalman.angle;
+
+    // Update adaptive inflation factors
+    applyAdaptiveInflation(glm::length(gyro), glm::length(y));
+
+    // Innovation covariance S = H * P * H_T + R * I
+    glm::mat3 S;
+    float rVal = mKalman.R * mKalman.innovationInflation;
+    S[0][0] = mKalman.P[0][0] + rVal; S[1][0] = mKalman.P[1][0];        S[2][0] = mKalman.P[2][0];
+    S[0][1] = mKalman.P[0][1];        S[1][1] = mKalman.P[1][1] + rVal; S[2][1] = mKalman.P[2][1];
+    S[0][2] = mKalman.P[0][2];        S[1][2] = mKalman.P[1][2];        S[2][2] = mKalman.P[2][2] + rVal;
+
+    glm::mat3 S_inv = glm::inverse(S);
+
+    // Kalman gain K = P * H_T * S_inv (dimensions 6x3)
+    float K[6][3];
+    for (int i = 0; i < 6; ++i) {
+        for (int j = 0; j < 3; ++j) {
+            // Row i of P_left multiplied by Column j of S_inv (column-major)
+            K[i][j] = mKalman.P[i][0] * S_inv[j].x + mKalman.P[i][1] * S_inv[j].y + mKalman.P[i][2] * S_inv[j].z;
+        }
+    }
+
+    // Update state estimate: x = x + K * y
+    float dx[6] = {0.0f};
+    for (int row = 0; row < 6; ++row) {
+        dx[row] = K[row][0] * y.x + K[row][1] * y.y + K[row][2] * y.z;
+    }
+
+    mKalman.angle.x += dx[0];
+    mKalman.angle.y += dx[1];
+    mKalman.angle.z += dx[2];
+    mKalman.bias.x  += dx[3];
+    mKalman.bias.y  += dx[4];
+    mKalman.bias.z  += dx[5];
+    // Update covariance estimate: P = (I - K * H) * P = P - K * H * P
+    float KH_P[6][6];
+    for (int col = 0; col < 6; ++col) {
+        for (int row = 0; row < 6; ++row) {
+            float sum = 0.0f;
+            for (int k = 0; k < 3; ++k) {
+                sum += K[row][k] * mKalman.P[k][col];
+            }
+            KH_P[row][col] = sum;
+        }
+    }
+    for (int col = 0; col < 6; ++col) {
+        for (int row = 0; row < 6; ++row) {
+            mKalman.P[row][col] -= KH_P[row][col];
+        }
+    }
+}
+
+void CameraEngine::pushLatencyBuffer(const glm::quat& q, int64_t ts) {
+    mLatencyBuffer.buffer[mLatencyBuffer.head] = {q, ts};
+    mLatencyBuffer.head = (mLatencyBuffer.head + 1) % EisLatencyBuffer::SIZE;
+    if (mLatencyBuffer.count < EisLatencyBuffer::SIZE) {
+        mLatencyBuffer.count++;
+    }
+}
+
+glm::quat CameraEngine::getCompensatedFromBuffer(int64_t frameTs, float latencyMs) {
+    // Note: Caller must hold mEisMutex!
+    int64_t targetTs = frameTs - static_cast<int64_t>(latencyMs * 1000000.0f);
+
+    if (mLatencyBuffer.count == 0) {
+        return mEis.currentQuat;
+    }
+
+    // Find closest orientation samples before and after targetTs
+    int lowerIdx = -1;
+    int upperIdx = -1;
+    int64_t minDiffUpper = INT64_MAX;
+    int64_t minDiffLower = INT64_MAX;
+
+    for (int i = 0; i < mLatencyBuffer.count; ++i) {
+        int64_t ts = mLatencyBuffer.buffer[i].ts;
+        if (ts >= targetTs) {
+            int64_t diff = ts - targetTs;
+            if (diff < minDiffUpper) {
+                minDiffUpper = diff;
+                upperIdx = i;
+            }
+        } else {
+            int64_t diff = targetTs - ts;
+            if (diff < minDiffLower) {
+                minDiffLower = diff;
+                lowerIdx = i;
+            }
+        }
+    }
+
+    if (lowerIdx != -1 && upperIdx != -1) {
+        int64_t t1 = mLatencyBuffer.buffer[lowerIdx].ts;
+        int64_t t2 = mLatencyBuffer.buffer[upperIdx].ts;
+        float t = (float)(targetTs - t1) / (float)(t2 - t1);
+        return glm::normalize(glm::slerp(mLatencyBuffer.buffer[lowerIdx].quat, mLatencyBuffer.buffer[upperIdx].quat, t));
+    }
+
+    // Fallback to latest sample in buffer
+    int latestIdx = (mLatencyBuffer.head - 1 + EisLatencyBuffer::SIZE) % EisLatencyBuffer::SIZE;
+    return mLatencyBuffer.buffer[latestIdx].quat;
+}
+
 
 glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRatio) {
     std::lock_guard<std::mutex> lock(mEisMutex);
@@ -991,25 +1157,14 @@ glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRati
         return glm::mat4(1.0f); // Identity matrix
     }
 
-    // 1. Interpolate orientation at exact camera frame presentation time (Zero Jitter)
-    glm::quat qCurrent = getInterpolatedOrientation(frameTimestampNs);
+    // 1. Get raw orientation from latency buffer (compensated for 45ms camera pipeline lag)
+    glm::quat compensated = getCompensatedFromBuffer(frameTimestampNs, 45.0f);
 
-    // 2. Predictive Latency Compensation (40ms forward extrapolation)
-    constexpr float PREDICTION_SEC = 0.040f; 
-    float omega = glm::length(mEis.gyroFiltered);
-    float predictAngle = omega * PREDICTION_SEC;
-    glm::quat predictedQuat = qCurrent;
-    if (predictAngle > 1e-6f) {
-        glm::vec3 axis = mEis.gyroFiltered / omega;
-        glm::quat dqPredict = glm::quat(std::cos(predictAngle * 0.5f), 
-                                        axis.x * std::sin(predictAngle * 0.5f),
-                                        axis.y * std::sin(predictAngle * 0.5f),
-                                        axis.z * std::sin(predictAngle * 0.5f));
-        predictedQuat = glm::normalize(dqPredict * qCurrent);
-    }
+    // 2. Get filtered/smoothed orientation from Kalman filter
+    glm::quat filtered = glm::normalize(glm::quat(mKalman.angle));
 
     // 3. Deviation calculation using 3D rotation matrix (preserves coupling, avoids gimbal lock)
-    glm::quat deviation = glm::inverse(mEis.smoothedQuat) * predictedQuat;
+    glm::quat deviation = glm::inverse(filtered) * compensated;
     glm::mat3 rotMat = glm::mat3_cast(deviation);
 
     // Extract raw translation components
@@ -1022,6 +1177,7 @@ glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRati
     ty /= mEis.fovY;
 
     // 5. Pan-adaptive strength scaling (continuous blend using smoothstep)
+    float omega = glm::length(mEis.gyroFiltered);
     float panBlend = glm::smoothstep(0.20f, 0.40f, omega);
     float adaptive = glm::mix(1.0f, 0.5f, panBlend);
     float strength = adaptive / glm::max(zoomRatio, 1.0f);

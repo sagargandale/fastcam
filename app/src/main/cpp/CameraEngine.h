@@ -91,6 +91,10 @@ private:
     void sensorLoop();                           // Dedicated 200Hz IMU thread body
     glm::mat4 getEisTransform(int64_t frameTimestampNs, float zoomRatio);  // Compute EIS transform matrix (thread-safe)
     glm::quat getInterpolatedOrientation(int64_t frameTimestampNs);        // Slerp integrated gyro samples at exact frame time
+    void kalmanPredictUpdate(const glm::vec3& gyro, float dt);             // Predict+Update with Adaptive Inflation
+    void applyAdaptiveInflation(float omegaMag, float innovationMag);      // Adjust process/measurement noise cov based on motion
+    void pushLatencyBuffer(const glm::quat& q, int64_t ts);                // Push integrated raw quat into history buffer
+    glm::quat getCompensatedFromBuffer(int64_t frameTs, float latencyMs);   // Get latency-compensated raw orientation from buffer
 
     // Java VM and JNI
     JavaVM* mJavaVM = nullptr;
@@ -204,6 +208,40 @@ private:
         int64_t lastGyroTs = 0; // ns timestamp of last gyro sample
     };
     EisState   mEis;
+
+    struct EisKalman {
+        glm::vec3 angle = glm::vec3(0.0f);
+        glm::vec3 bias = glm::vec3(0.0f);
+        float P[6][6] = {
+            {1.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+            {0.0f, 1.0f, 0.0f, 0.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 1.0f, 0.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 0.0f, 1.0f, 0.0f, 0.0f},
+            {0.0f, 0.0f, 0.0f, 0.0f, 1.0f, 0.0f},
+            {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.0f}
+        };
+
+        float Q_angle = 0.0012f;
+        float Q_bias = 0.00035f;
+        float R = 0.085f;
+
+        float motionInflation = 1.0f;
+        float innovationInflation = 1.0f;
+
+        float motionAvg = 0.0f;
+        float innovationAvg = 0.0f;
+    };
+    EisKalman mKalman;
+
+    struct EisLatencyBuffer {
+        static constexpr int SIZE = 128; // ~640ms history at 200Hz
+        struct Entry { glm::quat quat; int64_t ts; };
+        Entry buffer[SIZE];
+        int head = 0;
+        int count = 0;
+    };
+    EisLatencyBuffer mLatencyBuffer;
+
     std::mutex mEisMutex;
 
     // Exposure calculations
