@@ -328,16 +328,10 @@ void CameraEngine::setLens(const std::string& lensId) {
             mMaxZoomRatio = 8.0f;
             LOGI("setLens: ZoomRatio support not found, falling back to crop region zoom.");
         }
-        // Reset EIS quaternion state on lens switch
-        mOrientation[0] = 1.0f; mOrientation[1] = 0.0f;
-        mOrientation[2] = 0.0f; mOrientation[3] = 0.0f;
-        mLastGyroTimestamp = 0;
-        mLastAccelTimestamp = 0;
-        mOrientRingHead = 0;
-        mOrientRingFull = false;
-        for (int i = 0; i < kEisRingSize; ++i) {
-            mOrientRing[i][0] = 1.0f;
-            mOrientRing[i][1] = mOrientRing[i][2] = mOrientRing[i][3] = 0.0f;
+        // Reset EIS state on lens switch so we start fresh with the new lens geometry
+        {
+            std::lock_guard<std::mutex> eisLock(mEisMutex);
+            mEis = EisState{};
         }
         ACameraMetadata_free(chars);
     }
@@ -673,18 +667,10 @@ void CameraEngine::setStabilization(bool enabled) {
     // lens mechanical sway; software EIS corrects residual texture-space tremor.
     // Both can be active simultaneously for maximum stability.
 
-    // Reset quaternion IMU state so re-enabling starts with a clean slate
+    // Reset EIS state so re-enabling starts with a clean slate
     if (enabled) {
-        mOrientation[0] = 1.0f; mOrientation[1] = 0.0f;
-        mOrientation[2] = 0.0f; mOrientation[3] = 0.0f;
-        mLastGyroTimestamp = 0;
-        mLastAccelTimestamp = 0;
-        mOrientRingHead = 0;
-        mOrientRingFull = false;
-        for (int i = 0; i < kEisRingSize; ++i) {
-            mOrientRing[i][0] = 1.0f;
-            mOrientRing[i][1] = mOrientRing[i][2] = mOrientRing[i][3] = 0.0f;
-        }
+        std::lock_guard<std::mutex> eisLock(mEisMutex);
+        mEis = EisState{};
     }
     // Crop: 15% headroom (scale=0.85) when EIS on, full sensor (1.0) when off
     if (mGlRenderer) {
@@ -805,54 +791,207 @@ void CameraEngine::initGyroscope() {
         LOGW("No hardware gyroscope detected. EIS disabled.");
         return;
     }
-
     mAccelSensor = ASensorManager_getDefaultSensor(mSensorManager, ASENSOR_TYPE_ACCELEROMETER);
     if (!mAccelSensor) {
-        LOGW("No accelerometer detected. EIS will run gyro-only (no drift correction).");
+        LOGW("No accelerometer detected. EIS running gyro-only (no drift correction).");
     }
 
-    mLooper = ALooper_prepare(0);
-    mSensorEventQueue = ASensorManager_createEventQueue(
-            mSensorManager, mLooper, 0, nullptr, nullptr);
-
-    // Gyroscope at 200Hz (5ms) — high rate to capture fast hand shake (1-20Hz)
-    ASensorEventQueue_enableSensor(mSensorEventQueue, mGyroSensor);
-    ASensorEventQueue_setEventRate(mSensorEventQueue, mGyroSensor, 5000);
-
-    // Accelerometer at 50Hz (20ms) — used only for long-term gravity correction
-    if (mAccelSensor) {
-        ASensorEventQueue_enableSensor(mSensorEventQueue, mAccelSensor);
-        ASensorEventQueue_setEventRate(mSensorEventQueue, mAccelSensor, 20000);
+    // Reset EIS state
+    {
+        std::lock_guard<std::mutex> lock(mEisMutex);
+        mEis = EisState{};
     }
 
-    // Init quaternion state: identity orientation [w=1, x=0, y=0, z=0]
-    mOrientation[0] = 1.0f; mOrientation[1] = 0.0f;
-    mOrientation[2] = 0.0f; mOrientation[3] = 0.0f;
-    mGravity[0] = 0.0f; mGravity[1] = 0.0f; mGravity[2] = -9.81f;
-    mLastGyroTimestamp  = 0;
-    mLastAccelTimestamp = 0;
-    mOrientRingHead = 0;
-    mOrientRingFull = false;
-    // Zero-fill ring buffer with identity quaternions
-    for (int i = 0; i < kEisRingSize; ++i) {
-        mOrientRing[i][0] = 1.0f;
-        mOrientRing[i][1] = mOrientRing[i][2] = mOrientRing[i][3] = 0.0f;
-    }
-
-    LOGI("EIS IMU initialised: gyro@200Hz + accel@50Hz. Quaternion complementary filter.");
+    // Start dedicated sensor thread — creates its own ALooper internally
+    mSensorRunning = true;
+    mSensorThread = std::thread(&CameraEngine::sensorLoop, this);
+    LOGI("EIS sensor thread started (200Hz gyro + 50Hz accel).");
 }
 
 void CameraEngine::releaseGyroscope() {
-    if (mSensorEventQueue) {
-        if (mGyroSensor)  ASensorEventQueue_disableSensor(mSensorEventQueue, mGyroSensor);
-        if (mAccelSensor) ASensorEventQueue_disableSensor(mSensorEventQueue, mAccelSensor);
-        ASensorManager_destroyEventQueue(mSensorManager, mSensorEventQueue);
-        mSensorEventQueue = nullptr;
+    mSensorRunning = false;
+    if (mSensorThread.joinable()) {
+        mSensorThread.join();
     }
-    mGyroSensor  = nullptr;
-    mAccelSensor = nullptr;
-    mSensorManager = nullptr;
-    LOGI("EIS IMU sensors released.");
+    // mSensorEventQueue and mSensorLooper are owned by sensorLoop() — cleaned up there
+    mSensorEventQueue = nullptr;
+    mSensorLooper     = nullptr;
+    mGyroSensor       = nullptr;
+    mAccelSensor      = nullptr;
+    mSensorManager    = nullptr;
+    LOGI("EIS sensor thread stopped.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// sensorLoop() — dedicated 200Hz IMU integration thread
+// ─────────────────────────────────────────────────────────────────────────────
+void CameraEngine::sensorLoop() {
+    // Each thread that uses ASensorEventQueue must call ALooper_prepare() itself.
+    ALooper* looper = ALooper_prepare(0);
+    mSensorLooper = looper;
+
+    ASensorEventQueue* queue = ASensorManager_createEventQueue(
+            mSensorManager, looper, 0, nullptr, nullptr);
+    mSensorEventQueue = queue;
+
+    ASensorEventQueue_enableSensor(queue, mGyroSensor);
+    ASensorEventQueue_setEventRate(queue, mGyroSensor, 5000); // 200Hz
+
+    if (mAccelSensor) {
+        ASensorEventQueue_enableSensor(queue, mAccelSensor);
+        ASensorEventQueue_setEventRate(queue, mAccelSensor, 20000); // 50Hz
+    }
+
+    // Helper lambdas — quaternion math without external dependencies
+    auto qMul = [](float* out, const float* a, const float* b) {
+        out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
+        out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2];
+        out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1];
+        out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
+    };
+    auto qNorm = [](float* q) {
+        float n = std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
+        if (n < 1e-6f) { q[0]=1.f; q[1]=q[2]=q[3]=0.f; return; }
+        float inv = 1.f/n; q[0]*=inv; q[1]*=inv; q[2]*=inv; q[3]*=inv;
+    };
+    // Shortest-path SLERP
+    auto qSlerp = [](float* out, const float* a, const float* b, float t) {
+        float dot = a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3];
+        float b0=b[0], b1=b[1], b2=b[2], b3=b[3];
+        if (dot < 0.f) { dot=-dot; b0=-b0; b1=-b1; b2=-b2; b3=-b3; }
+        if (dot > 0.9995f) {
+            out[0]=a[0]+(b0-a[0])*t; out[1]=a[1]+(b1-a[1])*t;
+            out[2]=a[2]+(b2-a[2])*t; out[3]=a[3]+(b3-a[3])*t;
+            float n=std::sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]+out[3]*out[3]);
+            if(n>1e-6f){out[0]/=n;out[1]/=n;out[2]/=n;out[3]/=n;} return;
+        }
+        float th0=std::acos(dot), th=th0*t, s0=std::sin(th0);
+        float sa=std::sin(th)/s0, sb=(std::cos(th)-dot*sa/s0);
+        // Fallback to linear if sinT0 too small
+        if (s0 < 1e-6f) {
+            out[0]=a[0]+(b0-a[0])*t; out[1]=a[1]+(b1-a[1])*t;
+            out[2]=a[2]+(b2-a[2])*t; out[3]=a[3]+(b3-a[3])*t; return;
+        }
+        float sinTh = std::sin(th); float sinTh0 = std::sin(th0);
+        float s1 = sinTh / sinTh0;
+        float s00 = std::cos(th) - dot * s1;
+        out[0]=s00*a[0]+s1*b0; out[1]=s00*a[1]+s1*b1;
+        out[2]=s00*a[2]+s1*b2; out[3]=s00*a[3]+s1*b3;
+    };
+
+    while (mSensorRunning) {
+        // 10ms poll timeout — allows clean exit when mSensorRunning goes false
+        ALooper_pollOnce(10, nullptr, nullptr, nullptr);
+
+        ASensorEvent event;
+        while (ASensorEventQueue_getEvents(queue, &event, 1) > 0) {
+
+            if (event.type == ASENSOR_TYPE_GYROSCOPE) {
+                std::lock_guard<std::mutex> lock(mEisMutex);
+
+                if (mEis.lastGyroTs == 0) {
+                    mEis.lastGyroTs = event.timestamp;
+                    continue;
+                }
+                float dt = (event.timestamp - mEis.lastGyroTs) * 1e-9f;
+                mEis.lastGyroTs = event.timestamp;
+                if (dt <= 0.f || dt > 0.05f) continue;
+
+                float wx = event.data[0], wy = event.data[1], wz = event.data[2];
+                float omega = std::sqrt(wx*wx + wy*wy + wz*wz);
+                float halfA = omega * dt * 0.5f;
+
+                float dq[4];
+                if (omega > 1e-6f) {
+                    float s = std::sin(halfA) / omega;
+                    dq[0]=std::cos(halfA); dq[1]=wx*s; dq[2]=wy*s; dq[3]=wz*s;
+                } else {
+                    dq[0]=1.f; dq[1]=wx*dt*0.5f; dq[2]=wy*dt*0.5f; dq[3]=wz*dt*0.5f;
+                }
+
+                float qNew[4];
+                qMul(qNew, mEis.qCurrent, dq);
+                qNorm(qNew);
+                std::copy(qNew, qNew+4, mEis.qCurrent);
+
+                // Exponential SLERP smoothing — tracks the "intended camera path".
+                // alpha=0.25: fast enough to follow deliberate pans, slow enough to absorb shake.
+                float qSmNew[4];
+                qSlerp(qSmNew, mEis.qSmoothed, mEis.qCurrent, 0.25f);
+                qNorm(qSmNew);
+                std::copy(qSmNew, qSmNew+4, mEis.qSmoothed);
+
+            } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
+                std::lock_guard<std::mutex> lock(mEisMutex);
+
+                // Low-pass filter to estimate gravity (reject vibration)
+                const float lpA = 0.9f;
+                mEis.gravity[0] = lpA*mEis.gravity[0] + (1.f-lpA)*event.data[0];
+                mEis.gravity[1] = lpA*mEis.gravity[1] + (1.f-lpA)*event.data[1];
+                mEis.gravity[2] = lpA*mEis.gravity[2] + (1.f-lpA)*event.data[2];
+
+                float gLen = std::sqrt(mEis.gravity[0]*mEis.gravity[0]+
+                                       mEis.gravity[1]*mEis.gravity[1]+
+                                       mEis.gravity[2]*mEis.gravity[2]);
+                if (gLen < 1e-6f) continue;
+                float gx=mEis.gravity[0]/gLen, gy=mEis.gravity[1]/gLen, gz=mEis.gravity[2]/gLen;
+
+                // Tilt quaternion that maps measured gravity toward world-up (0,0,1)
+                float crossX=gy, crossY=-gx, crossZ=0.f;
+                float crossLen = std::sqrt(crossX*crossX + crossY*crossY);
+                if (crossLen > 1e-6f) {
+                    float cosA = std::max(-1.f, std::min(1.f, gz));
+                    float halfAng = std::acos(cosA) * 0.5f;
+                    float s = std::sin(halfAng) / crossLen;
+                    float qAccel[4] = {std::cos(halfAng), crossX*s, crossY*s, crossZ*s};
+
+                    // Complementary blend: gyro dominates (98%), accel corrects drift (2%)
+                    float qFused[4];
+                    qSlerp(qFused, qAccel, mEis.qCurrent, 0.98f);
+                    qNorm(qFused);
+                    std::copy(qFused, qFused+4, mEis.qCurrent);
+                }
+            }
+        }
+    }
+
+    // Cleanup — disable sensors and destroy queue on exit
+    if (mGyroSensor)  ASensorEventQueue_disableSensor(queue, mGyroSensor);
+    if (mAccelSensor) ASensorEventQueue_disableSensor(queue, mAccelSensor);
+    ASensorManager_destroyEventQueue(mSensorManager, queue);
+    LOGI("EIS sensor thread exiting cleanly.");
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getEisShift() — called every frame from cameraLoop() to read the UV correction
+// ─────────────────────────────────────────────────────────────────────────────
+void CameraEngine::getEisShift(float& dx, float& dy) {
+    dx = dy = 0.f;
+    if (!mUseStabilization) return;
+
+    std::lock_guard<std::mutex> lock(mEisMutex);
+
+    // q_deviation = conj(qSmoothed) * qCurrent — rotation from smooth path to current
+    float qConj[4] = {mEis.qSmoothed[0], -mEis.qSmoothed[1],
+                      -mEis.qSmoothed[2], -mEis.qSmoothed[3]};
+    float qDev[4];
+    // Hamilton product: qConj * qCurrent
+    qDev[0] = qConj[0]*mEis.qCurrent[0] - qConj[1]*mEis.qCurrent[1] - qConj[2]*mEis.qCurrent[2] - qConj[3]*mEis.qCurrent[3];
+    qDev[1] = qConj[0]*mEis.qCurrent[1] + qConj[1]*mEis.qCurrent[0] + qConj[2]*mEis.qCurrent[3] - qConj[3]*mEis.qCurrent[2];
+    qDev[2] = qConj[0]*mEis.qCurrent[2] - qConj[1]*mEis.qCurrent[3] + qConj[2]*mEis.qCurrent[0] + qConj[3]*mEis.qCurrent[1];
+    qDev[3] = qConj[0]*mEis.qCurrent[3] + qConj[1]*mEis.qCurrent[2] - qConj[2]*mEis.qCurrent[1] + qConj[3]*mEis.qCurrent[0];
+
+    // Small-angle: pitch ≈ 2*qDev[1], yaw ≈ 2*qDev[2]
+    float shakeAngleX = 2.f * qDev[1]; // pitch (vertical)
+    float shakeAngleY = 2.f * qDev[2]; // yaw   (horizontal)
+
+    // Convert angular deviation → UV shift via calibrated FOV
+    float rawX = shakeAngleY / mEisFovX;
+    float rawY = shakeAngleX / mEisFovY;
+
+    const float kMaxShift = 0.075f; // ±7.5% (matches 0.85 crop scale)
+    dx = std::max(-kMaxShift, std::min(rawX, kMaxShift));
+    dy = std::max(-kMaxShift, std::min(rawY, kMaxShift));
 }
 
 void CameraEngine::cameraLoop() {
@@ -870,230 +1009,10 @@ void CameraEngine::cameraLoop() {
         int frameIntervalUs = 1000000 / std::max(1, (int)mTargetFps);
         nextFrameTime += std::chrono::microseconds(frameIntervalUs);
 
-        // 1. EIS — iOS-inspired Quaternion IMU Complementary Filter
+        // 1. EIS — read stabilization shift from dedicated sensor thread (lock-free snapshot)
         float shiftX = 0.0f;
         float shiftY = 0.0f;
-
-        if (mUseStabilization && mSensorEventQueue) {
-            // ----------------------------------------------------------------
-            // Helper lambdas (capture nothing — operate on local temps only)
-            // ----------------------------------------------------------------
-
-            // Quaternion multiply: out = a ⊗ b (Hamilton product)
-            auto quatMul = [](float* out, const float* a, const float* b) {
-                out[0] = a[0]*b[0] - a[1]*b[1] - a[2]*b[2] - a[3]*b[3];
-                out[1] = a[0]*b[1] + a[1]*b[0] + a[2]*b[3] - a[3]*b[2];
-                out[2] = a[0]*b[2] - a[1]*b[3] + a[2]*b[0] + a[3]*b[1];
-                out[3] = a[0]*b[3] + a[1]*b[2] - a[2]*b[1] + a[3]*b[0];
-            };
-
-            // Normalize quaternion in-place
-            auto quatNorm = [](float* q) {
-                float n = std::sqrt(q[0]*q[0]+q[1]*q[1]+q[2]*q[2]+q[3]*q[3]);
-                if (n < 1e-6f) { q[0]=1.f; q[1]=q[2]=q[3]=0.f; return; }
-                float inv = 1.0f / n;
-                q[0]*=inv; q[1]*=inv; q[2]*=inv; q[3]*=inv;
-            };
-
-            // Spherical linear interpolation between two unit quaternions
-            auto quatSlerp = [](float* out, const float* a, const float* b, float t) {
-                float dot = a[0]*b[0]+a[1]*b[1]+a[2]*b[2]+a[3]*b[3];
-                // Choose shortest path
-                float b0=b[0], b1=b[1], b2=b[2], b3=b[3];
-                if (dot < 0.0f) { dot=-dot; b0=-b0; b1=-b1; b2=-b2; b3=-b3; }
-                if (dot > 0.9995f) {
-                    // Nearly identical — linear interpolation is fine
-                    out[0]=a[0]+(b0-a[0])*t; out[1]=a[1]+(b1-a[1])*t;
-                    out[2]=a[2]+(b2-a[2])*t; out[3]=a[3]+(b3-a[3])*t;
-                    float n=std::sqrt(out[0]*out[0]+out[1]*out[1]+out[2]*out[2]+out[3]*out[3]);
-                    if(n>1e-6f){out[0]/=n;out[1]/=n;out[2]/=n;out[3]/=n;}
-                    return;
-                }
-                float theta0 = std::acos(dot);
-                float theta  = theta0 * t;
-                float sinT0  = std::sin(theta0);
-                float sinT   = std::sin(theta);
-                float s0 = std::cos(theta) - dot * sinT / sinT0;
-                float s1 = sinT / sinT0;
-                out[0]=s0*a[0]+s1*b0; out[1]=s0*a[1]+s1*b1;
-                out[2]=s0*a[2]+s1*b2; out[3]=s0*a[3]+s1*b3;
-            };
-
-            // ----------------------------------------------------------------
-            // Stage 1: Drain IMU events, integrate gyro via quaternion, fuse accel
-            // ----------------------------------------------------------------
-            // Poll the looper with 0ms timeout (non-blocking) to ensure that the
-            // looper queries sensor file descriptors and populates the event queue.
-            ALooper_pollOnce(0, nullptr, nullptr, nullptr);
-
-            ASensorEvent event;
-            while (ASensorEventQueue_getEvents(mSensorEventQueue, &event, 1) > 0) {
-
-                if (event.type == ASENSOR_TYPE_GYROSCOPE) {
-                    if (mLastGyroTimestamp == 0) {
-                        mLastGyroTimestamp = event.timestamp;
-                        continue; // seed timestamp; dt unknown
-                    }
-                    float dt = (event.timestamp - mLastGyroTimestamp) * 1e-9f;
-                    mLastGyroTimestamp = event.timestamp;
-                    if (dt <= 0.0f || dt > 0.05f) continue; // reject stale/invalid
-
-                    // Angular velocity in device frame [rad/s]
-                    float wx = event.data[0];
-                    float wy = event.data[1];
-                    float wz = event.data[2];
-
-                    // Magnitude of rotation in this timestep (rad)
-                    float omega = std::sqrt(wx*wx + wy*wy + wz*wz);
-                    float halfAngle = omega * dt * 0.5f;
-
-                    // Delta quaternion from gyro: dq = [cos(θ/2), n̂ sin(θ/2)]
-                    float dq[4];
-                    if (omega > 1e-6f) {
-                        float s = std::sin(halfAngle) / omega;
-                        dq[0] = std::cos(halfAngle);
-                        dq[1] = wx * s;
-                        dq[2] = wy * s;
-                        dq[3] = wz * s;
-                    } else {
-                        // Near-zero rotation: identity + first-order approximation
-                        dq[0] = 1.0f;
-                        dq[1] = wx * dt * 0.5f;
-                        dq[2] = wy * dt * 0.5f;
-                        dq[3] = wz * dt * 0.5f;
-                    }
-
-                    // Integrate: q_new = q ⊗ dq
-                    float qNew[4];
-                    quatMul(qNew, mOrientation, dq);
-                    quatNorm(qNew);
-                    mOrientation[0]=qNew[0]; mOrientation[1]=qNew[1];
-                    mOrientation[2]=qNew[2]; mOrientation[3]=qNew[3];
-
-                } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
-                    // --------------------------------------------------------
-                    // Stage 2: Accelerometer complementary correction (drift fix)
-                    // Low-pass filter gravity; compute tilt quaternion; SLERP-blend.
-                    // Alpha=0.9 for gravity LP (reject vibration) → stable gravity estimate.
-                    // --------------------------------------------------------
-                    const float lpAlpha = 0.9f;
-                    mGravity[0] = lpAlpha*mGravity[0] + (1.0f-lpAlpha)*event.data[0];
-                    mGravity[1] = lpAlpha*mGravity[1] + (1.0f-lpAlpha)*event.data[1];
-                    mGravity[2] = lpAlpha*mGravity[2] + (1.0f-lpAlpha)*event.data[2];
-
-                    // Normalize gravity vector
-                    float gLen = std::sqrt(mGravity[0]*mGravity[0]+
-                                           mGravity[1]*mGravity[1]+
-                                           mGravity[2]*mGravity[2]);
-                    if (gLen < 1e-6f) continue;
-                    float gx = mGravity[0]/gLen;
-                    float gy = mGravity[1]/gLen;
-                    float gz = mGravity[2]/gLen;
-
-                    // Rotate the world "up" vector (0,0,1) by current orientation
-                    // to get predicted gravity in device frame. Compare vs measured.
-                    // For tilt correction, compute the rotation that maps measured_g → world_up.
-                    // Cross product gives rotation axis; dot product gives angle.
-                    // World up = (0, 0, 1). Measured acceleration from sensor is positive Z when flat.
-                    float crossX =  gy; // cross(g_device, world_up) = (gy*1-gz*0, gz*0-gx*1, gx*0-gy*0) = (gy, -gx, 0)
-                    float crossY = -gx;
-                    float crossZ =  0.0f;
-                    float crossLen = std::sqrt(crossX*crossX + crossY*crossY);
-
-                    if (crossLen > 1e-6f) {
-                        // Angle between measured gravity and (0,0,1)
-                        float cosA = gz; // dot(g_device, (0,0,1))
-                        cosA = std::max(-1.0f, std::min(1.0f, cosA));
-                        float halfA = std::acos(cosA) * 0.5f;
-                        float s = std::sin(halfA) / crossLen;
-                        float q_accel[4] = { std::cos(halfA), crossX*s, crossY*s, crossZ*s };
-
-                        // Complementary blend: gyro dominates (α=0.98), accel corrects drift (1-α=0.02)
-                        const float fusionAlpha = 0.98f;
-                        float q_fused[4];
-                        quatSlerp(q_fused, q_accel, mOrientation, fusionAlpha);
-                        quatNorm(q_fused);
-                        mOrientation[0]=q_fused[0]; mOrientation[1]=q_fused[1];
-                        mOrientation[2]=q_fused[2]; mOrientation[3]=q_fused[3];
-                    }
-                }
-            }
-
-            // ----------------------------------------------------------------
-            // Stage 3: Ring-buffer trajectory smoothing → isolate shake
-            // ----------------------------------------------------------------
-            // Push current orientation into ring buffer
-            int slot = mOrientRingHead;
-            mOrientRing[slot][0] = mOrientation[0];
-            mOrientRing[slot][1] = mOrientation[1];
-            mOrientRing[slot][2] = mOrientation[2];
-            mOrientRing[slot][3] = mOrientation[3];
-            mOrientRingHead = (mOrientRingHead + 1) % kEisRingSize;
-            if (!mOrientRingFull && mOrientRingHead == 0) mOrientRingFull = true;
-
-            int ringN = mOrientRingFull ? kEisRingSize : std::max(1, mOrientRingHead);
-
-            // Compute spherical average over the ring buffer = "intended camera path"
-            // Start from oldest entry, SLERP toward each subsequent entry by 1/remaining.
-            int oldest = mOrientRingFull ? mOrientRingHead : 0;
-            float q_smooth[4] = {
-                mOrientRing[oldest][0], mOrientRing[oldest][1],
-                mOrientRing[oldest][2], mOrientRing[oldest][3]
-            };
-            for (int i = 1; i < ringN; ++i) {
-                int idx = (oldest + i) % kEisRingSize;
-                float t = 1.0f / (i + 1.0f); // blending weight toward current sample
-                float q_tmp[4];
-                quatSlerp(q_tmp, q_smooth, mOrientRing[idx], t);
-                q_smooth[0]=q_tmp[0]; q_smooth[1]=q_tmp[1];
-                q_smooth[2]=q_tmp[2]; q_smooth[3]=q_tmp[3];
-            }
-
-            // q_shake = conj(q_smooth) ⊗ q_current  (deviation from smooth path)
-            float q_smoothConj[4] = { q_smooth[0], -q_smooth[1], -q_smooth[2], -q_smooth[3] };
-            float q_shake[4];
-            quatMul(q_shake, q_smoothConj, mOrientation);
-            quatNorm(q_shake);
-
-            // --- Dynamic Panning Attenuation ---
-            // If the user is intentionally panning/tilting the camera, the deviation angle
-            // will grow large. To prevent the crop window from hitting the ±7.5% boundary and
-            // causing visual jerks, we smoothly pull the target reference trajectory (q_smooth)
-            // towards the current orientation if the deviation exceeds kMaxDeviationRad.
-            float cosHalfTheta = std::abs(q_shake[0]);
-            float theta = 2.0f * std::acos(std::min(1.0f, cosHalfTheta));
-            const float kMaxDeviationRad = 0.05f; // ~2.8 degrees
-            if (theta > kMaxDeviationRad) {
-                float blendFactor = (theta - kMaxDeviationRad) / 0.02f; // fully blend if over 4 degrees
-                blendFactor = std::max(0.0f, std::min(1.0f, blendFactor));
-                
-                float q_adjusted[4];
-                quatSlerp(q_adjusted, q_smooth, mOrientation, blendFactor);
-                q_smooth[0]=q_adjusted[0]; q_smooth[1]=q_adjusted[1];
-                q_smooth[2]=q_adjusted[2]; q_smooth[3]=q_adjusted[3];
-
-                // Re-evaluate q_shake with the pan-adjusted reference path
-                float q_smoothConjAdjusted[4] = { q_smooth[0], -q_smooth[1], -q_smooth[2], -q_smooth[3] };
-                quatMul(q_shake, q_smoothConjAdjusted, mOrientation);
-                quatNorm(q_shake);
-            }
-
-            // Extract pitch (X rotation) and yaw correction (Y rotation) from q_shake.
-            // For small angles: q ≈ [1, qx/2, qy/2, qz/2] so 2*qx ≈ angle_around_x.
-            // Roll (around Z) is excluded — yaw/pan is intentional camera movement.
-            float shakeAngleX = 2.0f * q_shake[1]; // pitch (vertical shake)
-            float shakeAngleY = 2.0f * q_shake[2]; // roll  (horizontal shake)
-
-            // Convert angular shake (rad) → normalized UV shift via calibrated FOV
-            float rawX = shakeAngleY / mEisFovX; // horizontal image shift
-            float rawY = shakeAngleX / mEisFovY; // vertical image shift
-
-            // Clamp to ±7.5% UV headroom (crop scale 0.85 → 15% total → ±7.5%)
-            const float kMaxShift = 0.075f;
-            shiftX = std::max(-kMaxShift, std::min(rawX, kMaxShift));
-            shiftY = std::max(-kMaxShift, std::min(rawY, kMaxShift));
-        }
-        // When EIS is OFF (or OIS is used), shiftX/Y remain 0 and the shader uses full sensor readout
+        getEisShift(shiftX, shiftY);
 
 
         // Update filtered average luminance to reject high-frequency noise
@@ -1193,11 +1112,17 @@ void CameraEngine::cameraLoop() {
         mFrameAvailable = false;
         frameLock.unlock();
 
-        // 5. Update SurfaceTexture frame and render GPU passes
+        // 5. Snapshot render state (lock-free — no mutex held during GL work)
+        //    This allows setZoom/setOis/etc. to acquire mCameraMutex immediately
+        //    without waiting for a full frame render to complete.
+        bool   snapRecording = mIsRecording.load();
+        bool   snapIsFront   = (mActiveLensFacing == 0);
+
+        // Update SurfaceTexture frame and render GPU passes
         env->CallVoidMethod(mSurfaceTextureRef, mUpdateTexImageMethod);
         jlong timestampNs = env->CallLongMethod(mSurfaceTextureRef, mGetTimestampMethod);
 
-        mGlRenderer->renderFrame(shiftX, shiftY, mIsRecording.load(), timestampNs, mActiveLensFacing == 0);
+        mGlRenderer->renderFrame(shiftX, shiftY, snapRecording, timestampNs, snapIsFront);
 
         // 6. Read back hardware downsampled luminance for next PID iteration
         mLastLuma = mGlRenderer->readAverageLuma();

@@ -84,6 +84,8 @@ private:
     void cameraLoop();
     void initGyroscope();
     void releaseGyroscope();
+    void sensorLoop();                           // Dedicated 200Hz IMU thread body
+    void getEisShift(float& dx, float& dy);      // Read current EIS UV shift (thread-safe)
 
     // Java VM and JNI
     JavaVM* mJavaVM = nullptr;
@@ -148,33 +150,30 @@ private:
     bool mFrameAvailable = false;
 
     // IMU Sensor handles — gyroscope (200Hz) + accelerometer (50Hz)
-    ASensorManager*    mSensorManager     = nullptr;
-    const ASensor*     mGyroSensor        = nullptr;
-    const ASensor*     mAccelSensor       = nullptr;
-    ASensorEventQueue* mSensorEventQueue  = nullptr;
-    ALooper*           mLooper            = nullptr;
-    int64_t            mLastGyroTimestamp = 0; // ns; 0 = no sample received yet
-    int64_t            mLastAccelTimestamp= 0;
+    ASensorManager*    mSensorManager    = nullptr;
+    const ASensor*     mGyroSensor       = nullptr;
+    const ASensor*     mAccelSensor      = nullptr;
+    ASensorEventQueue* mSensorEventQueue = nullptr;
+    ALooper*           mSensorLooper     = nullptr; // Owned by mSensorThread
 
-    // ---- Quaternion-based EIS state (inspired by iOS CoreMotion) ----
-    // mOrientation: current fused orientation quaternion [w, x, y, z]
-    // Integrated from gyroscope at 200Hz, corrected by accelerometer at 50Hz.
-    float mOrientation[4] = {1.0f, 0.0f, 0.0f, 0.0f}; // identity
+    // Dedicated 200Hz sensor thread — completely decoupled from the camera render loop.
+    // Sensor events are drained and integrated here; only the final shift is read per frame.
+    std::thread        mSensorThread;
+    std::atomic<bool>  mSensorRunning{false};
 
-    // mGravity: latest gravity estimate in device frame from accelerometer low-pass
-    float mGravity[3] = {0.0f, 0.0f, -9.81f};
+    // ---- EIS State (protected by mEisMutex) ----
+    struct EisState {
+        float qCurrent[4]  = {1.f, 0.f, 0.f, 0.f}; // gyro-integrated orientation [w,x,y,z]
+        float qSmoothed[4] = {1.f, 0.f, 0.f, 0.f}; // exponentially smoothed "intended path"
+        float gravity[3]   = {0.f, 0.f, 9.81f};     // LP-filtered accelerometer (m/s²)
+        int64_t lastGyroTs = 0;                      // ns timestamp of last gyro sample
+    };
+    EisState   mEis;
+    std::mutex mEisMutex;
 
-    // Ring buffer of recent orientation quaternions — used to compute a smoothed
-    // "intended camera path" via spherical averaging. Shake = deviation from smooth path.
-    static const int kEisRingSize = 16;
-    float mOrientRing[kEisRingSize][4]; // circular buffer of [w,x,y,z] quaternions
-    int   mOrientRingHead = 0;
-    bool  mOrientRingFull = false;
-
-    // Camera field-of-view (radians) computed from focal length + physical sensor size.
+    // Camera field-of-view (radians) — computed from focal length + physical sensor size.
     // Used to convert angular shake (rad) → normalised UV shift.
-    // Defaults are safe fallbacks for a ~4mm / 1/1.7" sensor.
-    float mEisFovX = 1.22f; // ~70° horizontal
+    float mEisFovX = 1.22f; // ~70° horizontal (safe default for ~4mm / 1/1.7" sensor)
     float mEisFovY = 0.88f; // ~50° vertical
 
     // Exposure calculations

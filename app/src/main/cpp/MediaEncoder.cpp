@@ -31,21 +31,36 @@ bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps
         LOGI("MediaMuxer orientation hint set: %d degrees", rotationDegrees);
     }
 
-    // 1. Configure Video Encoder (H.264)
-    mVideoFormat = AMediaFormat_new();
-    AMediaFormat_setString(mVideoFormat, AMEDIAFORMAT_KEY_MIME, "video/avc");
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_WIDTH, width);
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_HEIGHT, height);
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F000789); // COLOR_FormatSurface
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_BIT_RATE, bitrate);
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_FRAME_RATE, fps);
-    AMediaFormat_setInt32(mVideoFormat, AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 1); // 1 second keyframes
-
-    mVideoCodec = AMediaCodec_createEncoderByType("video/avc");
+    // 1. Configure Video Encoder — try HEVC (H.265) first for ~40% lower bitrate at same quality.
+    //    Fall back to H.264 if the device does not support hardware HEVC encoding.
+    const char* videoMime = "video/hevc";
+    mVideoCodec = AMediaCodec_createEncoderByType(videoMime);
     if (!mVideoCodec) {
-        LOGE("Failed to create video encoder");
+        LOGI("HEVC encoder not available, falling back to H.264");
+        videoMime = "video/avc";
+        mVideoCodec = AMediaCodec_createEncoderByType(videoMime);
+    }
+    if (!mVideoCodec) {
+        LOGE("Failed to create video encoder (both HEVC and H.264)");
         return false;
     }
+    LOGI("Video encoder: %s", videoMime);
+
+    mVideoFormat = AMediaFormat_new();
+    AMediaFormat_setString(mVideoFormat, AMEDIAFORMAT_KEY_MIME,         videoMime);
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_WIDTH,        width);
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_HEIGHT,       height);
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F000789); // COLOR_FormatSurface
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BIT_RATE,     bitrate);
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_FRAME_RATE,   fps);
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 2); // 2s GOP
+    AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BITRATE_MODE, 2);     // CBR for consistent quality
+
+    // Color space metadata — tells the decoder/player how to interpret the YUV data.
+    // Without these, players guess and produce washed-out or shifted colors.
+    AMediaFormat_setInt32(mVideoFormat, "color-range",    2); // Full range (0–255, matches GL output)
+    AMediaFormat_setInt32(mVideoFormat, "color-standard", 1); // BT.709 (standard HD color primaries)
+    AMediaFormat_setInt32(mVideoFormat, "color-transfer", 3); // BT.709 transfer / SMPTE 170M
 
     media_status_t status = AMediaCodec_configure(mVideoCodec, mVideoFormat, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
     if (status != AMEDIA_OK) {
@@ -59,18 +74,18 @@ bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps
         return false;
     }
 
-    // 2. Configure Audio Encoder (AAC)
+    // 2. Configure Audio Encoder (AAC-LC)
     mAudioFormat = AMediaFormat_new();
-    AMediaFormat_setString(mAudioFormat, AMEDIAFORMAT_KEY_MIME, "audio/mp4a-latm");
-    AMediaFormat_setInt32(mAudioFormat, AMEDIAFORMAT_KEY_SAMPLE_RATE, sampleRate);
-    AMediaFormat_setInt32(mAudioFormat, AMEDIAFORMAT_KEY_CHANNEL_COUNT, channelCount);
-    AMediaFormat_setInt32(mAudioFormat, AMEDIAFORMAT_KEY_BIT_RATE, 128000); // 128 kbps
-    AMediaFormat_setInt32(mAudioFormat, AMEDIAFORMAT_KEY_AAC_PROFILE, 2); // AAC-LC
+    AMediaFormat_setString(mAudioFormat, AMEDIAFORMAT_KEY_MIME,          "audio/mp4a-latm");
+    AMediaFormat_setInt32(mAudioFormat,  AMEDIAFORMAT_KEY_SAMPLE_RATE,   sampleRate);
+    AMediaFormat_setInt32(mAudioFormat,  AMEDIAFORMAT_KEY_CHANNEL_COUNT, channelCount);
+    AMediaFormat_setInt32(mAudioFormat,  AMEDIAFORMAT_KEY_BIT_RATE,      128000); // 128 kbps
+    AMediaFormat_setInt32(mAudioFormat,  AMEDIAFORMAT_KEY_AAC_PROFILE,   2);      // AAC-LC
 
     mAudioCodec = AMediaCodec_createEncoderByType("audio/mp4a-latm");
     if (!mAudioCodec) {
         LOGE("Failed to create audio encoder");
-        // Audio optional, but log failure
+        // Audio is optional — video-only recording can still proceed
     } else {
         status = AMediaCodec_configure(mAudioCodec, mAudioFormat, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
         if (status != AMEDIA_OK) {
@@ -80,9 +95,10 @@ bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps
         }
     }
 
-    LOGI("MediaEncoder configured successfully.");
+    LOGI("MediaEncoder configured: %s %dx%d @ %dfps, %d bps", videoMime, width, height, fps, bitrate);
     return true;
 }
+
 
 bool MediaEncoder::start() {
     if (mVideoCodec) {
