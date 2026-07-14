@@ -898,8 +898,8 @@ void CameraEngine::sensorLoop() {
                 mEis.currentQuat = glm::normalize(mEis.currentQuat * dq);
 
                 // 3. Time-normalized trajectory smoothing with continuous smoothstep pan blending
-                float panBlend = glm::smoothstep(0.20f, 0.40f, omega);
-                float targetAlpha = glm::mix(mEis.smoothingAlpha, 0.28f, panBlend);
+                float panBlend = glm::smoothstep(0.15f, 1.00f, omega);
+                float targetAlpha = glm::mix(mEis.smoothingAlpha, 0.55f, panBlend);
                 float alpha = 1.0f - std::exp(-dt * 200.0f * targetAlpha);
                 mEis.smoothedQuat = glm::normalize(glm::slerp(mEis.smoothedQuat, mEis.currentQuat, alpha));
 
@@ -916,25 +916,30 @@ void CameraEngine::sensorLoop() {
             } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
                 std::lock_guard<std::mutex> lock(mEisMutex);
 
-                // Heavy low-pass filter gravity vector (alpha=0.02 -> 4Hz cutoff at 50Hz, vibration-free)
                 glm::vec3 accel(event.data[0], event.data[1], event.data[2]);
-                mEis.gravity = mEis.gravity * 0.98f + accel * 0.02f;
+                float accelMag = glm::length(accel);
 
-                glm::vec3 g = glm::normalize(mEis.gravity);
-                glm::vec3 worldUp(0.0f, 0.0f, 1.0f);
-                glm::vec3 crossVec = glm::cross(g, worldUp);
-                float crossLen = glm::length(crossVec);
+                // 1G Magnitude gate: only fuse gravity when net acceleration magnitude is close to 9.81 m/s²
+                // Rejects transient movements (footsteps, knocks, running) that distort gravity estimation
+                if (std::abs(accelMag - 9.81f) < 1.5f) {
+                    mEis.gravity = mEis.gravity * 0.98f + accel * 0.02f;
 
-                if (crossLen > 1e-6f) {
-                    float cosAngle = glm::clamp(g.z, -1.0f, 1.0f);
-                    float halfAngle = std::acos(cosAngle) * 0.5f;
-                    glm::quat qAccel = glm::quat(std::cos(halfAngle),
-                                                 crossVec.x * std::sin(halfAngle) / crossLen,
-                                                 crossVec.y * std::sin(halfAngle) / crossLen,
-                                                 0.0f); // Gravity-leveling drift correction
+                    glm::vec3 g = glm::normalize(mEis.gravity);
+                    glm::vec3 worldUp(0.0f, 0.0f, 1.0f);
+                    glm::vec3 crossVec = glm::cross(g, worldUp);
+                    float crossLen = glm::length(crossVec);
 
-                    // Steer gyro integrated quaternion towards gravity vector (complementary filter)
-                    mEis.currentQuat = glm::normalize(glm::slerp(qAccel, mEis.currentQuat, 0.98f));
+                    if (crossLen > 1e-6f) {
+                        float cosAngle = glm::clamp(g.z, -1.0f, 1.0f);
+                        float halfAngle = std::acos(cosAngle) * 0.5f;
+                        glm::quat qAccel = glm::quat(std::cos(halfAngle),
+                                                     crossVec.x * std::sin(halfAngle) / crossLen,
+                                                     crossVec.y * std::sin(halfAngle) / crossLen,
+                                                     0.0f); // Gravity-leveling tilt correction (pitch/roll only)
+
+                        // Complementary filter fusion (stabilizes tilt drift)
+                        mEis.currentQuat = glm::normalize(glm::slerp(qAccel, mEis.currentQuat, 0.98f));
+                    }
                 }
             }
         }
@@ -1167,18 +1172,19 @@ glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRati
     glm::quat deviation = glm::inverse(filtered) * compensated;
     glm::mat3 rotMat = glm::mat3_cast(deviation);
 
-    // Extract raw translation components
-    // rotMat[2][0] corresponds to sin(yaw) ≈ yaw, rotMat[2][1] is -sin(pitch) ≈ -pitch
-    float tx = -rotMat[2][0]; // Yaw compensation
-    float ty = rotMat[2][1];  // Pitch compensation
+    // Extract roll (Z-axis rotation), yaw (Y-axis), and pitch (X-axis) rotation angles
+    float roll = std::atan2(rotMat[0][1], rotMat[0][0]);
+    float yaw = std::asin(rotMat[2][0]);
+    float pitch = std::asin(-rotMat[2][1]);
 
-    // 4. Aspect-ratio and FOV scaling (normalizes shake by angular field of view)
-    tx /= mEis.fovX;
-    ty /= mEis.fovY;
+    // 4. Physical Camera Projection Model (focal length normalized mapping)
+    // maps physical angles to exact pixel shifts in normalized coordinate space
+    float tx = std::tan(-yaw) / std::tan(mEis.fovX * 0.5f);
+    float ty = std::tan(-pitch) / std::tan(mEis.fovY * 0.5f);
 
     // 5. Pan-adaptive strength scaling (continuous blend using smoothstep)
     float omega = glm::length(mEis.gyroFiltered);
-    float panBlend = glm::smoothstep(0.20f, 0.40f, omega);
+    float panBlend = glm::smoothstep(0.15f, 1.00f, omega);
     float adaptive = glm::mix(1.0f, 0.5f, panBlend);
     float strength = adaptive / glm::max(zoomRatio, 1.0f);
 
@@ -1190,11 +1196,12 @@ glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRati
     float zoomPenalty = 0.05f * std::max(0.0f, zoomRatio - 1.0f);
     float finalScale = std::max(baseCrop - zoomPenalty, 0.60f);
 
-    // Create 2D affine transformation matrix: translate then scale
+    // Create complete 2D affine transform matrix: translate * rotate * scale
     glm::mat4 trans = glm::translate(glm::mat4(1.0f), glm::vec3(offsetX, offsetY, 0.0f));
+    glm::mat4 rot = glm::rotate(glm::mat4(1.0f), -roll, glm::vec3(0.0f, 0.0f, 1.0f)); // Roll compensation
     glm::mat4 scale = glm::scale(glm::mat4(1.0f), glm::vec3(finalScale, finalScale, 1.0f));
 
-    return trans * scale;
+    return trans * rot * scale;
 }
 
 

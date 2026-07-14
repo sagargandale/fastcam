@@ -194,11 +194,11 @@ private:
         // Crop parameters (normalized)
         float cropX = 0.0f;
         float cropY = 0.0f;
-        float cropScale = 0.82f;        // ~18% margin (tuned for smoothness)
+        float cropScale = 0.80f;        // ~20% margin (tuned for high-smoothness headroom)
         
         // TUNED FOR SMOOTHNESS
-        float smoothingAlpha = 0.16f;   // Lower = smoother
-        float maxCorrection = 0.14f;    // Max stabilization crop boundary
+        float smoothingAlpha = 0.25f;   // Responsive intended virtual camera path
+        float maxCorrection = 0.20f;    // Max stabilization crop boundary (20%)
         float motionAdaptive = 1.0f;    // Motion intensity scale factor
 
         // FOV (radians)

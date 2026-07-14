@@ -24,18 +24,12 @@ out vec2 vTexCoord;
 void main() {
     gl_Position = vec4(aPosition, 0.0, 1.0);
     
-    // Scale UV coordinates centered at 0
-    float scaleX = uEisMat[0][0];
-    float scaleY = uEisMat[1][1];
-    vec2 scaled = (aTexCoord - 0.5) * vec2(scaleX, scaleY);
-    
-    // Translation components from the matrix (col 3)
-    float transX = uEisMat[3][0];
-    float transY = uEisMat[3][1];
-    
-    // Apply translation components directly from the matrix. The rotation/mirroring mapping
-    // below will correctly map them to screen axes in all orientations.
-    vec2 shifted  = scaled + 0.5 + vec2(transX, transY);
+    // Perform full 2D affine transformation on texture coordinates centered at (0.5, 0.5)
+    // This correctly scales, rotates (compensates roll), and translates the UV coordinates.
+    vec4 uvCentered = vec4(aTexCoord - 0.5, 0.0, 1.0);
+    vec4 uvTransformed = uEisMat * uvCentered;
+    vec2 shifted = uvTransformed.xy + 0.5;
+
 
     if (uRotate > 0.5) {
         if (uIsFront > 0.5) {
