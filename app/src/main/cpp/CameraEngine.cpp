@@ -855,8 +855,6 @@ void CameraEngine::sensorLoop() {
         ASensorEventQueue_setEventRate(queue, mAccelSensor, 20000); // 50Hz
     }
 
-    // Stronger low-pass filter (tuned for smoothness: 0.78f prev, 0.22f new)
-    const float kGyroLp = 0.22f;
     glm::vec3 gyroLp(0.0f);
 
     while (mSensorRunning) {
@@ -878,40 +876,45 @@ void CameraEngine::sensorLoop() {
                 mEis.lastGyroTs = event.timestamp;
                 if (dt <= 0.f || dt > 0.05f) continue; // reject invalid dt
 
-                // 1. IIR low-pass filter on raw gyro (kills MEMS quantization noise)
+                // 1. Time-normalized IIR low-pass filter on raw gyro (15Hz cutoff)
                 glm::vec3 rawGyro(event.data[0], event.data[1], event.data[2]);
-                gyroLp = gyroLp * (1.f - kGyroLp) + rawGyro * kGyroLp;
+                constexpr float cutoffHz = 15.0f;
+                constexpr float rc = 1.0f / (2.0f * M_PI * cutoffHz);
+                float alpha_lpf = dt / (rc + dt);
+                gyroLp = gyroLp * (1.f - alpha_lpf) + rawGyro * alpha_lpf;
                 mEis.gyroFiltered = gyroLp;
 
-                // 2. Quaternion integration
+                // 2. Quaternion integration (division-by-zero safe)
                 float omega = glm::length(gyroLp);
-                float halfAngle = omega * dt * 0.5f;
+                float angle = omega * dt;
                 glm::quat dq;
-                if (omega > 1e-6f) {
-                    float s = std::sin(halfAngle) / omega;
-                    dq = glm::quat(std::cos(halfAngle), gyroLp.x * s, gyroLp.y * s, gyroLp.z * s);
-                } else {
+                if (angle < 1e-7f) {
                     dq = glm::quat(1.0f, gyroLp.x * dt * 0.5f, gyroLp.y * dt * 0.5f, gyroLp.z * dt * 0.5f);
+                } else {
+                    glm::vec3 axis = gyroLp / omega;
+                    float halfAngle = angle * 0.5f;
+                    dq = glm::quat(std::cos(halfAngle), axis.x * std::sin(halfAngle), axis.y * std::sin(halfAngle), axis.z * std::sin(halfAngle));
                 }
                 mEis.currentQuat = glm::normalize(mEis.currentQuat * dq);
 
-                // 3. Very smooth slerp target trajectory interpolation using mEis.smoothingAlpha
-                // During fast pans (omega > 0.3 rad/s), temporarily raise alpha to 0.28f
-                // to follow intentional pan quickly and prevent crop hits.
-                float alpha = (omega > 0.3f) ? 0.28f : mEis.smoothingAlpha;
+                // 3. Time-normalized trajectory smoothing with continuous smoothstep pan blending
+                float panBlend = glm::smoothstep(0.20f, 0.40f, omega);
+                float targetAlpha = glm::mix(mEis.smoothingAlpha, 0.28f, panBlend);
+                float alpha = 1.0f - std::exp(-dt * 200.0f * targetAlpha);
                 mEis.smoothedQuat = glm::normalize(glm::slerp(mEis.smoothedQuat, mEis.currentQuat, alpha));
 
-                // 4. Update history
-                mEis.history[mEis.historyIdx] = mEis.smoothedQuat;
+                // 4. Save raw orientation into history ring-buffer for timestamp interpolation
+                mEis.history[mEis.historyIdx].timestampNs = event.timestamp;
+                mEis.history[mEis.historyIdx].orientation = mEis.currentQuat;
                 mEis.historyIdx = (mEis.historyIdx + 1) % EisState::HISTORY_SIZE;
                 if (mEis.historyIdx == 0) mEis.historyFull = true;
 
             } else if (event.type == ASENSOR_TYPE_ACCELEROMETER) {
                 std::lock_guard<std::mutex> lock(mEisMutex);
 
-                // Low-pass filter gravity vector (alpha=0.9 -> very slow tilt correction)
+                // Heavy low-pass filter gravity vector (alpha=0.02 -> 4Hz cutoff at 50Hz, vibration-free)
                 glm::vec3 accel(event.data[0], event.data[1], event.data[2]);
-                mEis.gravity = mEis.gravity * 0.90f + accel * 0.10f;
+                mEis.gravity = mEis.gravity * 0.98f + accel * 0.02f;
 
                 glm::vec3 g = glm::normalize(mEis.gravity);
                 glm::vec3 worldUp(0.0f, 0.0f, 1.0f);
@@ -924,9 +927,9 @@ void CameraEngine::sensorLoop() {
                     glm::quat qAccel = glm::quat(std::cos(halfAngle),
                                                  crossVec.x * std::sin(halfAngle) / crossLen,
                                                  crossVec.y * std::sin(halfAngle) / crossLen,
-                                                 0.0f); // Pitch/yaw tilt drift correction
+                                                 0.0f); // Gravity-leveling drift correction
 
-                    // Steer gyro integrated quaternion towards accel-derived tilt vector (alpha=0.02)
+                    // Steer gyro integrated quaternion towards gravity vector (complementary filter)
                     mEis.currentQuat = glm::normalize(glm::slerp(qAccel, mEis.currentQuat, 0.98f));
                 }
             }
@@ -939,33 +942,97 @@ void CameraEngine::sensorLoop() {
     LOGI("EIS sensor thread exiting cleanly.");
 }
 
-glm::mat4 CameraEngine::getEisTransform(float zoomRatio) {
+glm::quat CameraEngine::getInterpolatedOrientation(int64_t frameTimestampNs) {
+    // Note: Caller must hold mEisMutex!
+    if (mEis.historyIdx == 0 && !mEis.historyFull) {
+        return mEis.currentQuat;
+    }
+
+    int count = mEis.historyFull ? EisState::HISTORY_SIZE : mEis.historyIdx;
+    
+    // Find closest orientation samples before and after the frame presentation timestamp
+    int lowerIdx = -1;
+    int upperIdx = -1;
+    int64_t minDiffUpper = INT64_MAX;
+    int64_t minDiffLower = INT64_MAX;
+
+    for (int i = 0; i < count; ++i) {
+        int64_t ts = mEis.history[i].timestampNs;
+        if (ts >= frameTimestampNs) {
+            int64_t diff = ts - frameTimestampNs;
+            if (diff < minDiffUpper) {
+                minDiffUpper = diff;
+                upperIdx = i;
+            }
+        } else {
+            int64_t diff = frameTimestampNs - ts;
+            if (diff < minDiffLower) {
+                minDiffLower = diff;
+                lowerIdx = i;
+            }
+        }
+    }
+
+    // Perform spherical linear interpolation between the two closest bounds
+    if (lowerIdx != -1 && upperIdx != -1) {
+        int64_t t1 = mEis.history[lowerIdx].timestampNs;
+        int64_t t2 = mEis.history[upperIdx].timestampNs;
+        float t = (float)(frameTimestampNs - t1) / (float)(t2 - t1);
+        return glm::normalize(glm::slerp(mEis.history[lowerIdx].orientation, mEis.history[upperIdx].orientation, t));
+    }
+
+    return mEis.currentQuat;
+}
+
+glm::mat4 CameraEngine::getEisTransform(int64_t frameTimestampNs, float zoomRatio) {
     std::lock_guard<std::mutex> lock(mEisMutex);
 
     if (!mUseStabilization) {
         return glm::mat4(1.0f); // Identity matrix
     }
 
-    // Deviation from smoothed path: rotation to apply to correct frame
-    glm::quat deviation = glm::inverse(mEis.smoothedQuat) * mEis.currentQuat;
+    // 1. Interpolate orientation at exact camera frame presentation time (Zero Jitter)
+    glm::quat qCurrent = getInterpolatedOrientation(frameTimestampNs);
 
-    // Extract pitch (around X) and yaw (around Y) in radians
-    glm::vec3 euler = glm::eulerAngles(deviation);
-    float pitchDeg = glm::degrees(euler.x);
-    float yawDeg = glm::degrees(euler.y);
+    // 2. Predictive Latency Compensation (40ms forward extrapolation)
+    constexpr float PREDICTION_SEC = 0.040f; 
+    float omega = glm::length(mEis.gyroFiltered);
+    float predictAngle = omega * PREDICTION_SEC;
+    glm::quat predictedQuat = qCurrent;
+    if (predictAngle > 1e-6f) {
+        glm::vec3 axis = mEis.gyroFiltered / omega;
+        glm::quat dqPredict = glm::quat(std::cos(predictAngle * 0.5f), 
+                                        axis.x * std::sin(predictAngle * 0.5f),
+                                        axis.y * std::sin(predictAngle * 0.5f),
+                                        axis.z * std::sin(predictAngle * 0.5f));
+        predictedQuat = glm::normalize(dqPredict * qCurrent);
+    }
 
-    // Adaptive strength (less correction when stable to prevent floatiness)
-    float adaptive = 0.9f + 0.6f * glm::length(mEis.gyroFiltered);
-    adaptive = glm::clamp(adaptive, 0.6f, 1.4f);
+    // 3. Deviation calculation using 3D rotation matrix (preserves coupling, avoids gimbal lock)
+    glm::quat deviation = glm::inverse(mEis.smoothedQuat) * predictedQuat;
+    glm::mat3 rotMat = glm::mat3_cast(deviation);
 
-    float strength = 0.013f * adaptive / glm::max(zoomRatio, 1.0f);
+    // Extract raw translation components
+    // rotMat[2][0] corresponds to sin(yaw) ≈ yaw, rotMat[2][1] is -sin(pitch) ≈ -pitch
+    float tx = -rotMat[2][0]; // Yaw compensation
+    float ty = rotMat[2][1];  // Pitch compensation
 
-    // Negated to counteract physical shake direction
-    float offsetX = glm::clamp(-yawDeg * strength, -mEis.maxCorrection, mEis.maxCorrection);
-    float offsetY = glm::clamp(-pitchDeg * strength, -mEis.maxCorrection, mEis.maxCorrection);
+    // 4. Aspect-ratio and FOV scaling (normalizes shake by angular field of view)
+    tx /= mEis.fovX;
+    ty /= mEis.fovY;
 
-    // Zoom-adaptive crop margin: crops more at higher zoom to provide more stabilization headroom
-    float finalScale = mEis.cropScale * (1.0f / glm::max(zoomRatio * 0.3f, 1.0f));
+    // 5. Pan-adaptive strength scaling (continuous blend using smoothstep)
+    float panBlend = glm::smoothstep(0.20f, 0.40f, omega);
+    float adaptive = glm::mix(1.0f, 0.5f, panBlend);
+    float strength = adaptive / glm::max(zoomRatio, 1.0f);
+
+    float offsetX = glm::clamp(tx * strength, -mEis.maxCorrection, mEis.maxCorrection);
+    float offsetY = glm::clamp(ty * strength, -mEis.maxCorrection, mEis.maxCorrection);
+
+    // 6. Zoom-adaptive crop scale: dynamically crops more at high zoom to provide extra stabilization headroom
+    float baseCrop = mEis.cropScale;
+    float zoomPenalty = 0.05f * std::max(0.0f, zoomRatio - 1.0f);
+    float finalScale = std::max(baseCrop - zoomPenalty, 0.60f);
 
     // Create 2D affine transformation matrix: translate then scale
     glm::mat4 trans = glm::translate(glm::mat4(1.0f), glm::vec3(offsetX, offsetY, 0.0f));
@@ -993,8 +1060,7 @@ void CameraEngine::cameraLoop() {
         int frameIntervalUs = 1000000 / std::max(1, (int)mTargetFps);
         nextFrameTime += std::chrono::microseconds(frameIntervalUs);
 
-        // 1. EIS — read stabilization transform from dedicated sensor thread (lock-free snapshot)
-        glm::mat4 eisMat = getEisTransform(mZoomRatio);
+        // (EIS transform query is moved to step 5 below to sync with exact frame timestamp)
 
 
         // Update filtered average luminance to reject high-frequency noise
@@ -1103,6 +1169,9 @@ void CameraEngine::cameraLoop() {
         // Update SurfaceTexture frame and render GPU passes
         env->CallVoidMethod(mSurfaceTextureRef, mUpdateTexImageMethod);
         jlong timestampNs = env->CallLongMethod(mSurfaceTextureRef, mGetTimestampMethod);
+
+        // 5. Query timestamp-aligned, latency-compensated EIS transform
+        glm::mat4 eisMat = getEisTransform(timestampNs, mZoomRatio);
 
         mGlRenderer->renderFrame(eisMat, snapRecording, timestampNs, snapIsFront);
 

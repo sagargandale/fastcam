@@ -89,7 +89,8 @@ private:
     void initGyroscope();
     void releaseGyroscope();
     void sensorLoop();                           // Dedicated 200Hz IMU thread body
-    glm::mat4 getEisTransform(float zoomRatio);  // Compute EIS transform matrix (thread-safe)
+    glm::mat4 getEisTransform(int64_t frameTimestampNs, float zoomRatio);  // Compute EIS transform matrix (thread-safe)
+    glm::quat getInterpolatedOrientation(int64_t frameTimestampNs);        // Slerp integrated gyro samples at exact frame time
 
     // Java VM and JNI
     JavaVM* mJavaVM = nullptr;
@@ -171,9 +172,13 @@ private:
         glm::quat currentQuat = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);     // raw integrated
         glm::quat smoothedQuat = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);    // filtered target
         
-        // History for smoothing
-        static constexpr int HISTORY_SIZE = 32;
-        glm::quat history[HISTORY_SIZE] = { glm::quat(1.0f, 0.0f, 0.0f, 0.0f) };
+        // History ring-buffer for timestamp-aligned interpolation (sliding window)
+        struct Sample {
+            int64_t timestampNs = 0;
+            glm::quat orientation = glm::quat(1.0f, 0.0f, 0.0f, 0.0f);
+        };
+        static constexpr int HISTORY_SIZE = 64; // ~320ms buffer at 200Hz
+        Sample history[HISTORY_SIZE];
         int historyIdx = 0;
         bool historyFull = false;
         
