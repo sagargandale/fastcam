@@ -63,8 +63,61 @@ bool MediaEncoder::configure(int fd, int width, int height, int bitrate, int fps
     AMediaFormat_setInt32(mVideoFormat, "color-transfer", 3); // BT.709 transfer / SMPTE 170M
 
     media_status_t status = AMediaCodec_configure(mVideoCodec, mVideoFormat, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+    
+    // Fallback: If HEVC was created but failed to configure, fall back to H.264 (video/avc)
+    if (status != AMEDIA_OK && std::strcmp(videoMime, "video/hevc") == 0) {
+        LOGE("Failed to configure HEVC encoder: %d. Falling back to H.264.", status);
+        AMediaCodec_delete(mVideoCodec);
+        AMediaFormat_delete(mVideoFormat);
+
+        videoMime = "video/avc";
+        mVideoCodec = AMediaCodec_createEncoderByType(videoMime);
+        if (mVideoCodec) {
+            mVideoFormat = AMediaFormat_new();
+            AMediaFormat_setString(mVideoFormat, AMEDIAFORMAT_KEY_MIME,         videoMime);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_WIDTH,        width);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_HEIGHT,       height);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F000789);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BIT_RATE,     bitrate);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_FRAME_RATE,   fps);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 2);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BITRATE_MODE, 2);
+
+            AMediaFormat_setInt32(mVideoFormat, "color-range",    2);
+            AMediaFormat_setInt32(mVideoFormat, "color-standard", 1);
+            AMediaFormat_setInt32(mVideoFormat, "color-transfer", 3);
+
+            status = AMediaCodec_configure(mVideoCodec, mVideoFormat, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+        }
+    }
+
+    // Secondary Fallback: If configuration still failed (e.g. if the strict color metadata keys
+    // are rejected by a buggy driver on this chipset), retry standard H.264 configuration
+    // without those keys to ensure recording works.
+    if (status != AMEDIA_OK && mVideoCodec) {
+        LOGE("Failed to configure encoder with color metadata. Retrying H.264 without color keys.");
+        AMediaCodec_delete(mVideoCodec);
+        AMediaFormat_delete(mVideoFormat);
+
+        videoMime = "video/avc";
+        mVideoCodec = AMediaCodec_createEncoderByType(videoMime);
+        if (mVideoCodec) {
+            mVideoFormat = AMediaFormat_new();
+            AMediaFormat_setString(mVideoFormat, AMEDIAFORMAT_KEY_MIME,         videoMime);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_WIDTH,        width);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_HEIGHT,       height);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F000789);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BIT_RATE,     bitrate);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_FRAME_RATE,   fps);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_I_FRAME_INTERVAL, 2);
+            AMediaFormat_setInt32(mVideoFormat,  AMEDIAFORMAT_KEY_BITRATE_MODE, 2);
+
+            status = AMediaCodec_configure(mVideoCodec, mVideoFormat, nullptr, nullptr, AMEDIACODEC_CONFIGURE_FLAG_ENCODE);
+        }
+    }
+
     if (status != AMEDIA_OK) {
-        LOGE("Failed to configure video encoder: %d", status);
+        LOGE("Failed to configure video encoder in all configurations: %d", status);
         return false;
     }
 

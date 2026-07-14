@@ -1167,8 +1167,7 @@ void CameraEngine::cameraLoop() {
 
         // 7. Update histogram cached data on the loop thread (holds current EGL context)
         int32_t tempHist[64];
-        mGlRenderer->getHistogram(tempHist, 64);
-        {
+        if (mGlRenderer->getHistogram(tempHist, 64)) {
             std::lock_guard<std::mutex> histLock(mHistMutex);
             std::memcpy(mHistogramCached, tempHist, sizeof(tempHist));
         }

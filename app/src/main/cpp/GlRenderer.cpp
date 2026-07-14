@@ -653,7 +653,16 @@ bool GlRenderer::createHistFbo() {
     return true;
 }
 
-void GlRenderer::getHistogram(int32_t* outBins, int binCount) {
+bool GlRenderer::getHistogram(int32_t* outBins, int binCount) {
+    // Only execute the readback on the 4th frame to perfectly match the FBO draw throttle.
+    // Calling glReadPixels or mapping PBOs every frame while only drawing every 4th frame
+    // corrupts the PBO double-buffering logic and causes massive CPU/GPU synchronization stalls.
+    static int sReadThrottle = 0;
+    if (++sReadThrottle < 4) {
+        return false;
+    }
+    sReadThrottle = 0;
+
     std::memset(outBins, 0, binCount * sizeof(int32_t));
 
     int writeIdx = mHistPboIndex;
@@ -668,7 +677,7 @@ void GlRenderer::getHistogram(int32_t* outBins, int binCount) {
 
     if (!mHistPboReady) {
         mHistPboReady = true;
-        return;
+        return false; // First frame has no read result yet
     }
 
     glBindBuffer(GL_PIXEL_PACK_BUFFER, mHistPbo[readIdx]);
@@ -686,4 +695,5 @@ void GlRenderer::getHistogram(int32_t* outBins, int binCount) {
         glUnmapBuffer(GL_PIXEL_PACK_BUFFER);
     }
     glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    return true;
 }

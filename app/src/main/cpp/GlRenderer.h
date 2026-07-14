@@ -41,8 +41,8 @@ public:
     // Read average luminance from last rendered frame (for PID exposure)
     float readAverageLuma();
 
-    // Compute histogram from last rendered frame
-    void getHistogram(int32_t* outBins, int binCount);
+    // Compute histogram from last rendered frame (returns true if a new frame was read)
+    bool getHistogram(int32_t* outBins, int binCount);
 
     // Enable/disable real-time computational HDR tone-mapping
     void setHdrEnabled(bool enabled);
